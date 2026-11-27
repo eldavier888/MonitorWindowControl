@@ -96,7 +96,7 @@ public partial class App : Application
         {
             HelperManager.Stop(); // it would otherwise also place windows
             TryActivate();
-            _tray ??= new TrayIcon(_engine, ShowMainWindow, ExitApp);
+            _tray ??= new TrayIcon(_engine, ShowMainWindow, ExitApp, ShowApp, OnUndoneFromTray);
         }
         else
         {
@@ -246,6 +246,22 @@ public partial class App : Application
         else if (_window.WindowState == WindowState.Minimized) _window.WindowState = WindowState.Normal;
         _window.Activate();
         _window.Topmost = true; _window.Topmost = false; // bring to front reliably
+    }
+
+    /// <summary>Tray menu → More choices…: the window's Apps page with that app selected.</summary>
+    private void ShowApp(string key, string name)
+    {
+        ShowMainWindow();
+        _window?.ShowApp(key, name);
+    }
+
+    /// <summary>A tray notification was selected to undo something: say what went wrong, or offer to stop moving the app.</summary>
+    private void OnUndoneFromTray(Engine.UndoOutcome outcome)
+    {
+        if (outcome.Error != null) { _tray?.ShowBalloon("Couldn't undo that", outcome.Error); return; }
+        if (outcome.StopMovingKey == null) return;
+        ShowMainWindow();
+        _window?.AskStopMoving(outcome.StopMovingKey, outcome.StopMovingName ?? outcome.StopMovingKey);
     }
 
     public void ExitApp()

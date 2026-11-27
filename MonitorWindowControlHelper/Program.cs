@@ -60,6 +60,7 @@ internal static class Program
         host.SessionChanged = engine.OnSessionChanged;
         host.LockChanged = engine.OnSessionLock;
         host.PowerChanged = sleeping => { if (sleeping) engine.OnSuspending(); else engine.OnResumed(); };
+        host.HotKey = engine.OnHotKey;
         engine.Start(importLegacy: false, who: "Helper");
 
         if (engine.Settings.RunMode != RunModes.Helper)
@@ -71,6 +72,9 @@ internal static class Program
         // Stop when the settings window switches to another mode, or asks us to.
         engine.Changed += () => { if (engine.Settings.RunMode != RunModes.Helper) host.Quit(); };
         var wait = ThreadPool.RegisterWaitForSingleObject(exitEvent, (_, _) => host.Post(host.Quit), null, Timeout.Infinite, true);
+        // The settings window asks for Recent activity, "Move open windows to their monitors", Undo… (nothing runs until it asks).
+        using var requestEvent = new EventWaitHandle(false, EventResetMode.AutoReset, HelperChannel.EventName);
+        var requests = ThreadPool.RegisterWaitForSingleObject(requestEvent, (_, _) => host.Post(engine.AnswerRequest), null, Timeout.Infinite, false);
 
         // Normally this succeeds at once. If the tray app is still shutting down, keep trying instead of giving up.
         if (!engine.Activate(learn: true))
@@ -88,6 +92,7 @@ internal static class Program
 
         host.Run();
         wait.Unregister(null);
+        requests.Unregister(null);
         engine.Deactivate();
         return 0;
     }

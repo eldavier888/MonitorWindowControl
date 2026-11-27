@@ -70,9 +70,13 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
 ## Using it
 
 - **Tray icon** (tray mode): double-click to open the window. Right-click for *Open*, *Move new windows*
-  (pause/resume), *Monitors* (treat a monitor as switched off, see below), *Exit*. Closing the window just puts it back in the tray (**Exit** in the window closes it completely).
+  (pause/resume), *Move open windows to their monitors*, *Bring all windows to*, *Monitors* (treat a monitor as switched
+  off, see below), *Exit*. Closing the window just puts it back in the tray (**Exit** in the window closes it completely).
   In the other modes there's no tray icon: start `MonitorWindowControl.exe` again to change settings, and closing
   its window closes it completely.
+- **Always open on…** (tray mode): the top of the tray menu shows the last app you used, for example
+  "Chrome · on 1 · Main". Point to it and choose a monitor, *Where I used it last* or *Never move this app*: it's saved as
+  "Set by you", and its open windows move there right away. *More choices…* opens the Apps page with that app selected.
 - **Move new windows**: moves new windows to their app's monitor. Turn it off to pause everything (learning too).
 - **Learn automatically**: only the window you're actually using counts. If the same app stays focused on the
   same monitor for two checks in a row (about 4 seconds), that monitor becomes its home. Windows sitting in the
@@ -163,6 +167,34 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
 
   Your choice is "Set by you": learning never overrides it. **Forget** (or the Delete key) removes one app and
   **Forget all…** removes everything; both ask first. With many apps, type in **Search apps** to filter the list.
+- **Tidy up** (General page): **Move open windows to their monitors** puts every open window on its app's monitor, once.
+  The button says how many windows it would move. Apps set to *Never move*, apps it hasn't learned yet (unless they're on a
+  monitor that's switched off or kept for other apps), minimized, fullscreen and administrator windows, windows on other
+  virtual desktops, and windows you moved yourself are left alone (tick **Include windows I moved myself** to move those
+  too). It's also in the tray menu, with **Bring all windows to** ▸ a monitor (the one with the mouse pointer first), and
+  each monitor on the Monitors page has **Move its windows** to move the windows on it to another monitor. On the Apps
+  page, **Move its windows there now** moves an open app's windows to the chosen monitor without saving anything. None of
+  these change where apps open next time.
+- **Windows outside every monitor**: after monitors change (a resolution change, a monitor that went away), app windows
+  that ended up outside every monitor are moved to their app's monitor, or the main monitor, by themselves. Minimized ones
+  stay minimized and open there when you restore them. Apps set to *Never move* are left alone.
+- **Keyboard shortcuts** (General page, off until you turn them on; not available with *Nothing in the background*):
+  **Windows key + Ctrl + Alt + 1, 2, 3…** sends the window you're using to the monitor with that number (yours, or the
+  order on the Monitors page), **Windows key + Ctrl + Alt + Right / Left arrow** to the next or previous monitor, and
+  **Windows key + Ctrl + Alt + Home** moves open windows to their monitors. Add **Shift** to a send shortcut to also make
+  that monitor the app's monitor from now on ("Set by you"; in tray mode a notification confirms it). Moves are sized
+  for the monitor and keep the window maximized. If another app already uses some keys, the shortcut says *In use by
+  another app*: choose other keys under **Change the keys** (Ctrl, Alt and/or the Windows key, plus a key). Only the
+  program that places windows (the tray app or the helper) listens for them.
+- **Recent activity** (bottom of the General page): the last 10 things it did, each with a plain reason ("Learned: you
+  used it there", "Set by you", "TV is switched off, so the main monitor for now", "Skipped: it runs as administrator")
+  and, where possible, **Undo**: a moved window goes back where it was (if it's still open and its monitor is
+  connected), a learned or chosen monitor goes back to what it was (and isn't learned there again until you restart
+  it). Undo the move of an app's new window twice and it asks whether to stop moving that app. In helper mode, the list
+  shows what the helper did too. It's kept in memory only.
+- **Notifications** (General page, tray mode only, all off by default): a notification when it learns a new monitor for
+  an app, when an app opens on another monitor because its own is off, when a monitor comes back and its windows move
+  back, or when it can't move an app that runs as administrator. At most one a day for each app; select one to undo it.
 - **Open activity log**: every move, learn, pin and forget is written to a log with the time.
 - Everything works with the keyboard (Tab, arrow keys, Space/Enter) and with Narrator.
 
@@ -203,7 +235,8 @@ Windows that run as administrator can't be moved by a normal app; Monitor Window
 
 The tiny helper is unpacked to `%LocalAppData%\MonitorWindowControl\MonitorWindowControlHelper.exe` when a mode
 or shortcut needs it. Next to it, `signin.txt` only notes when you last signed in, so apps that opened while signing in
-are placed once per sign-in.
+are placed once per sign-in, and in helper mode `request.json` and `reply.json` pass Recent activity, *Move open windows*
+and *Undo* between the settings window and the helper (window titles are never written there).
 
 To start completely fresh: in the window, press **Forget all…** (this also deletes your launch shortcuts), turn off
 **Start with Windows**, set **How it runs** to the tray, and press **Exit**. Then delete those two folders and

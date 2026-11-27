@@ -72,6 +72,9 @@ internal sealed class NativeHost : IEngineHost, IDisposable
     /// <summary>Called just before the PC goes to sleep (true) and when it wakes up (false).</summary>
     public Action<bool>? PowerChanged { get; set; }
 
+    /// <summary>Called when a keyboard shortcut registered with <see cref="RegisterHotKey"/> is pressed (its id).</summary>
+    public Action<int>? HotKey { get; set; }
+
     private readonly bool _sessionNotifications;
 
     public NativeHost()
@@ -101,6 +104,11 @@ internal sealed class NativeHost : IEngineHost, IDisposable
         _timers[t.Id] = t;
         return t;
     }
+
+    public bool RegisterHotKey(int id, int modifiers, int key) =>
+        Native.RegisterHotKey(_hwnd, id, (uint)modifiers, (uint)key);
+
+    public void UnregisterHotKey(int id) => Native.UnregisterHotKey(_hwnd, id);
 
     public void Post(Action action)
     {
@@ -136,6 +144,9 @@ internal sealed class NativeHost : IEngineHost, IDisposable
                 case WM_DISPLAYCHANGE:
                     DisplayChanged?.Invoke();
                     break;
+                case Native.WM_HOTKEY:
+                    HotKey?.Invoke((int)wParam);
+                    return IntPtr.Zero;
                 case WM_SETTINGCHANGE when wParam == (IntPtr)0x2F: // SPI_SETWORKAREA: taskbar moved / resized
                     DisplayChanged?.Invoke();
                     break;

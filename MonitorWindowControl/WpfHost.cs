@@ -1,4 +1,5 @@
 using System;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using Microsoft.Win32;
 
@@ -9,6 +10,7 @@ public sealed class WpfHost : IEngineHost, IDisposable
 {
     private readonly Dispatcher _dispatcher;
     private Engine? _engine;
+    private HwndSource? _hotKeyWindow; // an invisible message-only window for keyboard shortcuts, made when first needed
 
     public WpfHost(Dispatcher dispatcher) => _dispatcher = dispatcher;
 
@@ -55,11 +57,40 @@ public sealed class WpfHost : IEngineHost, IDisposable
 
     public IEngineTimer CreateTimer(int intervalMs, Action tick) => new Timer(_dispatcher, intervalMs, tick);
 
+    public bool RegisterHotKey(int id, int modifiers, int key)
+    {
+        if (_hotKeyWindow == null)
+        {
+            const int HWND_MESSAGE = -3;
+            _hotKeyWindow = new HwndSource(new HwndSourceParameters("Monitor Window Control shortcuts")
+            {
+                ParentWindow = new IntPtr(HWND_MESSAGE), Width = 0, Height = 0, WindowStyle = 0,
+            });
+            _hotKeyWindow.AddHook(HotKeyHook);
+        }
+        return Native.RegisterHotKey(_hotKeyWindow.Handle, id, (uint)modifiers, (uint)key);
+    }
+
+    public void UnregisterHotKey(int id)
+    {
+        if (_hotKeyWindow != null) Native.UnregisterHotKey(_hotKeyWindow.Handle, id);
+    }
+
+    private IntPtr HotKeyHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg != (int)Native.WM_HOTKEY) return IntPtr.Zero;
+        handled = true;
+        try { _engine?.OnHotKey((int)wParam); }
+        catch (Exception ex) { Log.Write("Unexpected error (keyboard shortcut): " + ex); }
+        return IntPtr.Zero;
+    }
+
     public void Dispose()
     {
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        _hotKeyWindow?.Dispose(); _hotKeyWindow = null;
         _engine = null;
     }
 

@@ -7,8 +7,9 @@ using System.Windows.Forms;
 namespace MonitorWindowControl;
 
 /// <summary>
-/// Notification-area icon: double-click opens; menu has Open, Move new windows (pause), Monitors ("treat as switched
-/// off", two clicks from the couch), Exit.
+/// Notification-area icon: double-click opens. The menu has, for the last app you used, "Always open on…"; then Open,
+/// Move new windows (pause), Move open windows to their monitors, Bring all windows to…, Monitors ("treat as switched
+/// off", two clicks from the couch), Exit. Notifications from the engine show as balloons; selecting one undoes it.
 /// </summary>
 internal sealed class TrayIcon : IDisposable
 {
@@ -16,27 +17,51 @@ internal sealed class TrayIcon : IDisposable
     private readonly Engine _engine;
     private readonly NotifyIcon _icon;
     private readonly ContextMenuStrip _menu;
+    private readonly ToolStripMenuItem _appItem;
+    private readonly ToolStripSeparator _appSeparator;
     private readonly ToolStripMenuItem _enabledItem;
+    private readonly ToolStripMenuItem _tidyItem;
+    private readonly ToolStripMenuItem _gatherItem;
     private readonly ToolStripMenuItem _monitorsItem;
     private readonly Icon? _iconImage;
     private readonly Font _boldFont;
+    private readonly Action<string, string> _openApp;
+    private readonly Action<Engine.UndoOutcome> _undone;
+    private Image? _appImage;
+    private int? _balloonActivity; // the Recent activity event the balloon on screen is about (selecting it undoes it)
 
-    public TrayIcon(Engine engine, Action open, Action exit)
+    /// <param name="openApp">Opens the window on the Apps page with this app (key, name) selected.</param>
+    /// <param name="undone">Called after a balloon was selected to undo something.</param>
+    public TrayIcon(Engine engine, Action open, Action exit, Action<string, string> openApp, Action<Engine.UndoOutcome> undone)
     {
         _engine = engine;
+        _openApp = openApp;
+        _undone = undone;
 
         using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("app.ico"))
             _iconImage = s != null ? new Icon(s, SystemInformation.SmallIconSize) : null;
 
         _menu = new ContextMenuStrip();
         using (var menuFont = SystemFonts.MenuFont ?? new Font("Segoe UI", 9f)) _boldFont = new Font(menuFont, FontStyle.Bold);
+        _appItem = new ToolStripMenuItem("") { Visible = false };
+        _appSeparator = new ToolStripSeparator { Visible = false };
         var openItem = new ToolStripMenuItem("Open", null, (_, _) => open()) { Font = _boldFont };
         _enabledItem = new ToolStripMenuItem("Move new windows", null, (_, _) => _engine.SetEnabled(!_engine.Settings.Enabled));
+        _tidyItem = new ToolStripMenuItem("Move open windows to their monitors", null, (_, _) => _engine.TidyUp(includeMoved: false));
+        _gatherItem = new ToolStripMenuItem("Bring all windows to");
         _monitorsItem = new ToolStripMenuItem("Monitors");
         _monitorsItem.DropDownItems.Add(new ToolStripMenuItem("(none)") { Enabled = false }); // filled when the menu opens
         var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => exit());
-        _menu.Items.AddRange(new ToolStripItem[] { openItem, _enabledItem, _monitorsItem, new ToolStripSeparator(), exitItem });
-        _menu.Opening += (_, _) => FillMonitorsMenu();
+        _menu.Items.AddRange(new ToolStripItem[]
+        {
+            _appItem, _appSeparator, openItem, _enabledItem, _tidyItem, _gatherItem, _monitorsItem, new ToolStripSeparator(), exitItem,
+        });
+        _menu.Opening += (_, _) =>
+        {
+            FillAppMenu();
+            FillTidyItems();
+            FillMonitorsMenu();
+        };
 
         _icon = new NotifyIcon
         {
@@ -46,9 +71,12 @@ internal sealed class TrayIcon : IDisposable
             Visible = true,
         };
         _icon.MouseDoubleClick += (_, e) => { if (e.Button == MouseButtons.Left) open(); };
+        _icon.BalloonTipClicked += (_, _) => UndoFromBalloon();
+        _icon.BalloonTipClosed += (_, _) => _balloonActivity = null;
 
         _engine.Changed += Update;
         _engine.Notice += ShowBalloon;
+        _engine.ActivityNotice += ShowActivity;
         Update();
     }
 
@@ -65,13 +93,96 @@ internal sealed class TrayIcon : IDisposable
     }
 
     /// <summary>
+    /// The top of the menu: the last app you used ("Chrome · on 1 · Main") with "Always open on" ▸ each monitor, Where I
+    /// used it last, Never move this app, and More choices… (the Apps page). Choosing a monitor also moves its open windows.
+    /// </summary>
+    private void FillAppMenu()
+    {
+        DisposeItems(_appItem);
+        _appItem.Image = null;
+        _appImage?.Dispose(); _appImage = null;
+        var fg = _engine.LastForegroundApp();
+        bool show = fg != null && _engine.Monitors.Count > 0;
+        _appItem.Visible = _appSeparator.Visible = show;
+        if (!show) return;
+
+        string key = fg!.App.Key, name = fg.App.DisplayName;
+        var rule = _engine.Settings.Find(key);
+        _appItem.Text = Escape(fg.Monitor != null ? $"{name} · on {fg.Monitor.Name}" : name);
+        _appImage = IconOf(fg.ExePath);
+        _appItem.Image = _appImage;
+
+        var items = _appItem.DropDownItems;
+        items.Add(new ToolStripMenuItem($"Always open {Escape(name)} on:") { Enabled = false });
+        bool setMonitor = rule is { Pinned: true, NeverMove: false, FollowLastUsed: false, FollowMouse: false };
+        foreach (var m in _engine.Monitors)
+        {
+            var item = new ToolStripMenuItem(Escape(m.Label))
+            {
+                Checked = setMonitor && _engine.Resolve(rule!)?.DeviceName == m.DeviceName,
+            };
+            item.Click += (_, _) => _engine.Pin(key, m, name);
+            items.Add(item);
+        }
+        items.Add(new ToolStripSeparator());
+        var lastUsed = new ToolStripMenuItem("Where I used it last") { Checked = rule?.FollowLastUsed == true };
+        lastUsed.Click += (_, _) =>
+        {
+            // Every monitor, except monitors kept for chosen apps (the same as Save with nothing ticked on the Apps page).
+            var allowed = _engine.Monitors.Where(m => !m.OnlyChosenApps).ToList();
+            if (allowed.Count == 0) allowed = _engine.Monitors.ToList();
+            _engine.SetFollowLastUsed(key, allowed, fg.Monitor, name);
+        };
+        items.Add(lastUsed);
+        var never = new ToolStripMenuItem("Never move this app") { Checked = rule?.NeverMove == true };
+        never.Click += (_, _) => _engine.Pin(key, null, name);
+        items.Add(never);
+        items.Add(new ToolStripSeparator());
+        items.Add(new ToolStripMenuItem("More choices…", null, (_, _) => _openApp(key, name)));
+    }
+
+    /// <summary>The app's icon for the menu (from its program file), or null.</summary>
+    private static Image? IconOf(string? exePath)
+    {
+        if (string.IsNullOrEmpty(exePath)) return null;
+        try
+        {
+            using var icon = Icon.ExtractAssociatedIcon(exePath);
+            return icon?.ToBitmap();
+        }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>
+    /// "Move 3 windows to their monitors" (with a preview count, worked out when the menu opens) and "Bring all windows
+    /// to" ▸ each monitor, the one with the mouse pointer first.
+    /// </summary>
+    private void FillTidyItems()
+    {
+        int n = _engine.TidyCount(includeMoved: false);
+        _tidyItem.Text = n > 0 ? $"Move {n} open window{(n == 1 ? "" : "s")} to their monitors" : "Open windows are on their monitors";
+        _tidyItem.Enabled = n > 0;
+
+        DisposeItems(_gatherItem);
+        var monitors = _engine.Monitors.ToList();
+        _gatherItem.Visible = monitors.Count > 1;
+        if (monitors.Count < 2) return;
+        string here = Screen.FromPoint(Cursor.Position).DeviceName;
+        foreach (var m in monitors.OrderByDescending(m => string.Equals(m.DeviceName, here, StringComparison.OrdinalIgnoreCase)))
+        {
+            bool isHere = string.Equals(m.DeviceName, here, StringComparison.OrdinalIgnoreCase);
+            _gatherItem.DropDownItems.Add(new ToolStripMenuItem(Escape(m.Label) + (isHere ? " (this monitor)" : ""), null,
+                (_, _) => _engine.MoveWindowsTo(m, null)));
+        }
+    }
+
+    /// <summary>
     /// Monitors ▸ "Treat as switched off": one checkable entry per monitor (until you turn it back on), plus
     /// "For 1 hour ▸". Built each time the menu opens, so it always shows the monitors connected now.
     /// </summary>
     private void FillMonitorsMenu()
     {
-        foreach (ToolStripItem old in _monitorsItem.DropDownItems.Cast<ToolStripItem>().ToList()) old.Dispose();
-        _monitorsItem.DropDownItems.Clear();
+        DisposeItems(_monitorsItem);
         var monitors = _engine.Monitors.Where(m => !m.IsDuplicated).ToList();
         _monitorsItem.Visible = monitors.Count > 1;
         if (monitors.Count < 2) return;
@@ -94,19 +205,47 @@ internal sealed class TrayIcon : IDisposable
         _monitorsItem.DropDownItems.Add(forAnHour);
     }
 
-    /// <summary>A monitor name as menu text ("&amp;" would otherwise underline the next letter).</summary>
+    private static void DisposeItems(ToolStripMenuItem parent)
+    {
+        foreach (ToolStripItem old in parent.DropDownItems.Cast<ToolStripItem>().ToList()) old.Dispose();
+        parent.DropDownItems.Clear();
+    }
+
+    /// <summary>A monitor or app name as menu text ("&amp;" would otherwise underline the next letter).</summary>
     private static string Escape(string text) => text.Replace("&", "&&");
 
-    public void ShowBalloon(string title, string text) => _icon.ShowBalloonTip(4000, title, text, ToolTipIcon.None);
+    public void ShowBalloon(string title, string text)
+    {
+        _balloonActivity = null;
+        _icon.ShowBalloonTip(4000, title, text.Length > 0 ? text : "Monitor Window Control", ToolTipIcon.None);
+    }
+
+    /// <summary>A Recent activity event as a notification. If it can be undone, selecting the notification undoes it.</summary>
+    private void ShowActivity(ActivityEntry entry)
+    {
+        string text = entry.Reason.Length > 0 ? entry.Reason : "Monitor Window Control";
+        if (entry.CanUndo) text += "\nSelect this notification to undo it.";
+        _icon.ShowBalloonTip(5000, entry.Text, text, ToolTipIcon.None);
+        _balloonActivity = entry.CanUndo ? entry.Id : null;
+    }
+
+    private void UndoFromBalloon()
+    {
+        if (_balloonActivity is not int id) return;
+        _balloonActivity = null;
+        _undone(_engine.Undo(id));
+    }
 
     public void Dispose()
     {
         _engine.Changed -= Update;
         _engine.Notice -= ShowBalloon;
+        _engine.ActivityNotice -= ShowActivity;
         _icon.Visible = false;
         _icon.Dispose();
         _menu.Dispose();
         _iconImage?.Dispose();
+        _appImage?.Dispose();
         _boldFont.Dispose();
     }
 }

@@ -107,6 +107,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** DDC/CI is slow (50 to 200 ms) and many TVs don't implement it over HDMI, so the manual switch is the dependable path and DDC must never run on the placement path. Settings writes must go through the existing cross-process lock.
 
 ### 4. Bring windows home, gather them here, and rescue off-screen windows
+**Status:** built in v1.6.0 (the Monitors page has a "Move its windows" button with a menu of the other monitors, as its cards have no '…' menu; the Apps page's "Move its windows there now" is in the selected app's options; "Bring all windows to" lists every monitor, the one with the mouse pointer first; apps it hasn't learned are only tidied off a monitor that can't be used; the off-screen rescue leaves "Never move" apps alone; in helper mode the helper does the moving, so it knows which windows you moved yourself).
 
 *Window rescue · effort M*
 
@@ -186,6 +187,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Deliberate cross-monitor windows (presenter views, OBS projectors) are mostly large or unowned, so the size limit and 'overlaps the owner's monitor' rule protect them. Modal dialogs that reposition themselves are handled by reusing Verify.
 
 ### 10. Undo, 'why it went there' and optional notices
+**Status:** built in v1.6.0 (all four notifications are off by default; a tray balloon can't hold an Undo button, so selecting the balloon undoes it; in helper mode the helper keeps its last 10 events in memory and the settings window shows them in Recent activity; Recent activity also lists other events, such as settings you changed, without Undo).
 
 *Trust · effort M*
 
@@ -210,6 +212,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Overlay windows must be per-monitor DPI aware, topmost, WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE, and ignored by the engine (it already skips its own PID). Each tile must be a focusable radio button with a Narrator name.
 
 ### 12. Keyboard shortcuts: send this window to monitor N, and make it the app's home
+**Status:** built in v1.6.0 (keys are chosen with check boxes for Ctrl, Alt and the Windows key plus a list of keys, in a dialog under 'Change the keys', instead of a key-capture button: Windows itself and the shortcuts already registered catch many of these key combinations before the settings window could see them; Shift is always the 'also save' version. A send-to-monitor shortcut is registered for each connected monitor only, and none with a single monitor).
 
 *Keyboard · effort M*
 
@@ -222,6 +225,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Only the process holding the Active mutex may register hotkeys, and the helper needs WM_HOTKEY in its NativeHost message window. Hide the section in launch-only mode. Elevated foreground windows can't be moved: say so in a balloon.
 
 ### 13. Quick 'Always open on…' for the window in front, from the tray
+**Status:** built in v1.6.0 (the last app window in front is noted when you switch windows, with a window event, rather than on the learning tick, so it's right even when you open the menu within 2 seconds; 'Where I used it last' allows every monitor except ones kept for chosen apps, and 'More choices…' opens the Apps page with the app selected).
 
 *Tray · effort S*
 

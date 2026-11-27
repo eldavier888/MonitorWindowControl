@@ -228,6 +228,230 @@ public static class FallbackModes
         mode is Main or Leave ? mode : mode == Monitor && monitor != null ? Monitor : null;
 }
 
+/// <summary>"Keyboard shortcuts" (off by default): send the window you're using to another monitor.</summary>
+public sealed class HotKeySettings
+{
+    /// <summary>The shortcuts work (only in the program that places windows: the tray app or the helper).</summary>
+    public bool Enabled { get; set; }
+    /// <summary>Shortcuts you changed. An action that isn't listed has its default keys.</summary>
+    public List<HotKeyChoice> Keys { get; set; } = new();
+}
+
+/// <summary>Your keys for one keyboard shortcut.</summary>
+public sealed class HotKeyChoice
+{
+    /// <summary>What it does: one of <see cref="HotKeyActions"/>.</summary>
+    public string Action { get; set; } = "";
+    /// <summary>
+    /// Ctrl, Alt and/or the Windows key (<see cref="HotKeyActions.Ctrl"/>, <see cref="HotKeyActions.Alt"/>,
+    /// <see cref="HotKeyActions.Win"/>). Never Shift: the same keys with Shift also save the monitor as the app's home.
+    /// </summary>
+    public int Modifiers { get; set; }
+    /// <summary>The key (a Windows virtual-key code). 0 = no shortcut for this action.</summary>
+    public int Key { get; set; }
+}
+
+/// <summary>The keyboard shortcuts, their default keys, and how keys are written.</summary>
+public static class HotKeyActions
+{
+    /// <summary>Modifier flags, as RegisterHotKey takes them.</summary>
+    public const int Alt = 0x1, Ctrl = 0x2, Shift = 0x4, Win = 0x8;
+    /// <summary>Send the window you're using to the next or previous monitor, in your order.</summary>
+    public const string Next = "Next", Previous = "Previous";
+    /// <summary>"Move open windows to their monitors".</summary>
+    public const string Tidy = "Tidy";
+    /// <summary>Send-to-monitor shortcuts exist for monitors 1 to 9.</summary>
+    public const int MaxMonitors = 9;
+    private const int Default = Ctrl | Alt | Win;
+
+    /// <summary>Every action, in the order they're registered and shown.</summary>
+    public static readonly string[] All =
+        Enumerable.Range(1, MaxMonitors).Select(Monitor).Concat(new[] { Next, Previous, Tidy }).ToArray();
+
+    /// <summary>"Send to monitor n".</summary>
+    public static string Monitor(int n) => "Monitor" + n;
+
+    /// <summary>The monitor number of a "send to monitor n" action, or 0 for any other action.</summary>
+    public static int MonitorNumber(string? action) =>
+        action != null && action.StartsWith("Monitor", StringComparison.Ordinal) && int.TryParse(action.AsSpan(7), out int n)
+        && n >= 1 && n <= MaxMonitors ? n : 0;
+
+    public static bool IsKnown(string? action) => action is Next or Previous or Tidy || MonitorNumber(action) > 0;
+
+    /// <summary>True for actions that have a Shift version which also saves the monitor as the app's home.</summary>
+    public static bool HasSaveVersion(string action) => action != Tidy;
+
+    /// <summary>The default keys: Windows key + Ctrl + Alt + 1…9, Right, Left, Home.</summary>
+    public static (int Modifiers, int Key) DefaultKeys(string action) => action switch
+    {
+        Next => (Default, 0x27),     // Right arrow
+        Previous => (Default, 0x25), // Left arrow
+        Tidy => (Default, 0x24),     // Home
+        _ => (Default, 0x30 + MonitorNumber(action)),
+    };
+
+    /// <summary>The keys for an action: yours if you changed them, else the default.</summary>
+    public static (int Modifiers, int Key) KeysFor(HotKeySettings s, string action) =>
+        s.Keys.FirstOrDefault(k => k.Action == action) is { } k ? (k.Modifiers, k.Key) : DefaultKeys(action);
+
+    /// <summary>True for keys that can be a shortcut: at least one of Ctrl, Alt or the Windows key, and a known key (or none).</summary>
+    public static bool IsValid(int modifiers, int key) =>
+        key == 0 || ((modifiers & (Ctrl | Alt | Win)) != 0 && (modifiers & ~(Ctrl | Alt | Win)) == 0 && KeyName(key) != null);
+
+    /// <summary>Keys in words, the way Windows writes them: "Windows key + Ctrl + Alt + 1" ("None" for no shortcut).</summary>
+    public static string Text(int modifiers, int key)
+    {
+        if (key == 0) return "None";
+        var parts = new List<string>();
+        if ((modifiers & Win) != 0) parts.Add("Windows key");
+        if ((modifiers & Ctrl) != 0) parts.Add("Ctrl");
+        if ((modifiers & Alt) != 0) parts.Add("Alt");
+        if ((modifiers & Shift) != 0) parts.Add("Shift");
+        parts.Add(KeyName(key) ?? $"key {key}");
+        return string.Join(" + ", parts);
+    }
+
+    /// <summary>The keys you can choose, in the order they're listed.</summary>
+    public static readonly int[] Choices =
+        Enumerable.Range(0x30, 10).Concat(Enumerable.Range(0x41, 26)).Concat(Enumerable.Range(0x70, 12))
+            .Concat(new[] { 0x25, 0x27, 0x26, 0x28, 0x24, 0x23, 0x21, 0x22, 0x2D, 0x2E }).ToArray();
+
+    /// <summary>A key's name ("1", "A", "F5", "Right arrow"…), or null if it can't be chosen.</summary>
+    public static string? KeyName(int key) => key switch
+    {
+        >= 0x30 and <= 0x39 or >= 0x41 and <= 0x5A => ((char)key).ToString(),
+        >= 0x70 and <= 0x7B => "F" + (key - 0x6F),
+        0x25 => "Left arrow", 0x26 => "Up arrow", 0x27 => "Right arrow", 0x28 => "Down arrow",
+        0x24 => "Home", 0x23 => "End", 0x21 => "Page Up", 0x22 => "Page Down", 0x2D => "Insert", 0x2E => "Delete",
+        _ => null,
+    };
+}
+
+/// <summary>"Notifications": which events show a notification from the tray icon (all off by default).</summary>
+public sealed class NoticeSettings
+{
+    /// <summary>When it learns a new monitor for an app.</summary>
+    public bool Learned { get; set; }
+    /// <summary>When an app opens on another monitor because its own is off.</summary>
+    public bool OpenedElsewhere { get; set; }
+    /// <summary>When a monitor comes back and windows move back to it.</summary>
+    public bool MonitorBack { get; set; }
+    /// <summary>When it can't move an app that runs as administrator.</summary>
+    public bool AdminApp { get; set; }
+}
+
+/// <summary>One line in Recent activity (kept in memory only).</summary>
+public sealed class ActivityEntry
+{
+    public int Id { get; set; }
+    /// <summary>Local time.</summary>
+    public DateTime Time { get; set; }
+    /// <summary>One of <see cref="ActivityKinds"/> (picks the icon).</summary>
+    public string Kind { get; set; } = ActivityKinds.Info;
+    /// <summary>What happened: "Moved Spotify to 2 · Side".</summary>
+    public string Text { get; set; } = "";
+    /// <summary>Why, in plain words: "Learned: you use it there".</summary>
+    public string Reason { get; set; } = "";
+    public bool CanUndo { get; set; }
+    public bool Undone { get; set; }
+}
+
+/// <summary>What kind of event a Recent activity line is.</summary>
+public static class ActivityKinds
+{
+    public const string Moved = "Moved", Learned = "Learned", SetByYou = "SetByYou", Skipped = "Skipped", Back = "Back", Info = "Info";
+}
+
+/// <summary>
+/// A request from the settings window to the background helper, which knows what happens in the background (Recent
+/// activity, which windows you moved yourself, keyboard shortcuts) and holds what's needed to undo a move.
+/// </summary>
+public sealed class HelperRequest
+{
+    public const string Status = "Status", Tidy = "Tidy", Gather = "Gather", MoveApp = "MoveApp", Undo = "Undo";
+    public int Id { get; set; }
+    /// <summary>One of the commands above.</summary>
+    public string Command { get; set; } = Status;
+    /// <summary>"Move open windows to their monitors": also windows you moved yourself.</summary>
+    public bool IncludeMoved { get; set; }
+    /// <summary>The Recent activity line to undo.</summary>
+    public int ActivityId { get; set; }
+    /// <summary>The app whose windows move (<see cref="MoveApp"/>), and its name.</summary>
+    public string? AppKey { get; set; }
+    public string? AppName { get; set; }
+    /// <summary>Move only windows on this monitor (<see cref="Gather"/>; null = all).</summary>
+    public string? FromDevice { get; set; }
+    /// <summary>The monitor windows move to.</summary>
+    public string? ToDevice { get; set; }
+}
+
+/// <summary>The helper's answer to a <see cref="HelperRequest"/>.</summary>
+public sealed class HelperReply
+{
+    public int Id { get; set; }
+    /// <summary>A problem to show (null = it worked).</summary>
+    public string? Error { get; set; }
+    /// <summary>How many windows would move (status) or moved.</summary>
+    public int Count { get; set; }
+    /// <summary>After an undo: this app was moved back twice, so ask whether to stop moving it.</summary>
+    public string? StopMovingKey { get; set; }
+    public string? StopMovingName { get; set; }
+    public List<ActivityEntry> Recent { get; set; } = new();
+    /// <summary>Keyboard shortcuts that couldn't be registered: an action, or an action + "+Shift".</summary>
+    public List<string> HotKeyProblems { get; set; } = new();
+}
+
+/// <summary>
+/// Passes <see cref="HelperRequest"/>s from the settings window to the helper and its answers back: two small files
+/// next to the helper and an event that wakes the helper up. Nothing runs or polls when no request is made.
+/// </summary>
+public static class HelperChannel
+{
+    public const string EventName = @"Local\MonitorWindowControl.HelperRequest";
+    private static string RequestFile => Path.Combine(Paths.HelperDir, "request.json");
+    private static string ReplyFile => Path.Combine(Paths.HelperDir, "reply.json");
+
+    public static bool WriteRequest(HelperRequest r) => Write(RequestFile, JsonSerializer.Serialize(r, SettingsJson.Default.HelperRequest));
+
+    public static HelperRequest? ReadRequest() =>
+        Read(RequestFile) is string json ? Try(() => JsonSerializer.Deserialize(json, SettingsJson.Default.HelperRequest)) : null;
+
+    public static bool WriteReply(HelperReply r) => Write(ReplyFile, JsonSerializer.Serialize(r, SettingsJson.Default.HelperReply));
+
+    public static HelperReply? ReadReply() =>
+        Read(ReplyFile) is string json ? Try(() => JsonSerializer.Deserialize(json, SettingsJson.Default.HelperReply)) : null;
+
+    private static T? Try<T>(Func<T?> f) where T : class
+    {
+        try { return f(); } catch (Exception) { return null; }
+    }
+
+    private static string? Read(string file)
+    {
+        try { return File.Exists(file) ? File.ReadAllText(file) : null; }
+        catch (Exception) { return null; } // being written right now: read again shortly
+    }
+
+    /// <summary>Writes atomically (temp file + rename), so the other process never reads half a file.</summary>
+    private static bool Write(string file, string json)
+    {
+        string tmp = file + "." + Environment.ProcessId + ".tmp";
+        try
+        {
+            Directory.CreateDirectory(Paths.HelperDir);
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, file, true);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"Couldn't pass a request to the helper: {ex.Message}");
+            try { File.Delete(tmp); } catch { }
+            return false;
+        }
+    }
+}
+
 /// <summary>Your own name and/or number for a monitor.</summary>
 public sealed class MonitorNickname
 {
@@ -283,6 +507,10 @@ public sealed class AppSettings
     /// pressing Make main, starts it again). Saved, so the helper and the settings window agree.
     /// </summary>
     public bool KeepMainStopped { get; set; }
+    /// <summary>"Keyboard shortcuts" (off by default).</summary>
+    public HotKeySettings HotKeys { get; set; } = new();
+    /// <summary>"Notifications" (all off by default).</summary>
+    public NoticeSettings Notices { get; set; } = new();
 
     public AppRule? Find(string key) =>
         Apps.FirstOrDefault(a => string.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase));
@@ -294,6 +522,13 @@ public sealed class AppSettings
 [JsonSerializable(typeof(MonitorHardware))]
 [JsonSerializable(typeof(MonitorOptions))]
 [JsonSerializable(typeof(WindowPosition))]
+[JsonSerializable(typeof(AppRule))]
+[JsonSerializable(typeof(HotKeySettings))]
+[JsonSerializable(typeof(HotKeyChoice))]
+[JsonSerializable(typeof(NoticeSettings))]
+[JsonSerializable(typeof(ActivityEntry))]
+[JsonSerializable(typeof(HelperRequest))]
+[JsonSerializable(typeof(HelperReply))]
 internal partial class SettingsJson : JsonSerializerContext { }
 
 /// <summary>
@@ -441,6 +676,18 @@ public static class SettingsStore
         if (s.KeepMainMonitor != null) CleanRef(s.KeepMainMonitor);
         else s.KeepMainStopped = false;
         s.RunMode = RunModes.Normalize(s.RunMode);
+        s.Notices ??= new();
+        CleanHotKeys(s.HotKeys ??= new());
+    }
+
+    /// <summary>Keyboard shortcuts: drops unknown actions, duplicates and keys that can't be a shortcut (they get their default again).</summary>
+    private static void CleanHotKeys(HotKeySettings h)
+    {
+        h.Keys ??= new();
+        h.Keys.RemoveAll(k => k == null || !HotKeyActions.IsKnown(k.Action) || !HotKeyActions.IsValid(k.Modifiers, k.Key));
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        h.Keys.RemoveAll(k => !seen.Add(k.Action));
+        foreach (var k in h.Keys) if (k.Key == 0) k.Modifiers = 0;
     }
 
     /// <summary>A known fallback mode with its monitor (only kept for <see cref="FallbackModes.Monitor"/>).</summary>

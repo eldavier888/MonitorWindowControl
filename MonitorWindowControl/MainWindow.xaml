@@ -221,6 +221,69 @@
                             <ui:ToggleSwitch x:Name="SleepToggle" AutomationProperties.Name="Put windows back after sleep" Click="SleepToggle_Click" />
                         </ui:CardControl>
 
+                        <TextBlock Style="{StaticResource SectionHeader}" Text="Tidy up" />
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Broom24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Move open windows to their monitors" />
+                                    <TextBlock x:Name="TidyHint" Style="{StaticResource Secondary}" />
+                                    <CheckBox x:Name="TidyIncludeMoved" Content="Include windows I moved myself" Margin="0,6,0,0"
+                                              AutomationProperties.Name="Include windows I moved myself" Click="TidyIncludeMoved_Click" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button x:Name="TidyButton" Content="Move windows" MinWidth="140" Click="Tidy_Click"
+                                       AutomationProperties.Name="Move open windows to their monitors" />
+                        </ui:CardControl>
+
+                        <!-- Keyboard shortcuts (off by default; they need something running in the background) -->
+                        <StackPanel x:Name="HotKeysSection">
+                            <TextBlock Style="{StaticResource SectionHeader}" Text="Keyboard shortcuts" />
+                            <ui:CardControl Icon="{ui:SymbolIcon Symbol=Keyboard24}">
+                                <ui:CardControl.Header>
+                                    <StackPanel Margin="0,0,16,0">
+                                        <TextBlock Style="{StaticResource CardTitle}" Text="Keyboard shortcuts" />
+                                        <TextBlock x:Name="HotKeysHint" Style="{StaticResource Secondary}" />
+                                    </StackPanel>
+                                </ui:CardControl.Header>
+                                <ui:ToggleSwitch x:Name="HotKeysToggle" AutomationProperties.Name="Keyboard shortcuts" Click="HotKeysToggle_Click" />
+                            </ui:CardControl>
+                            <ui:CardExpander x:Name="HotKeysExpander" Icon="{ui:SymbolIcon Symbol=KeyboardShift24}" Margin="0,0,0,4"
+                                             AutomationProperties.Name="Change the keys">
+                                <ui:CardExpander.Header>
+                                    <StackPanel>
+                                        <TextBlock Style="{StaticResource CardTitle}" Text="Change the keys" />
+                                        <TextBlock Style="{StaticResource Secondary}" Text="Hold Shift too, and that monitor also becomes the app's monitor from now on." />
+                                    </StackPanel>
+                                </ui:CardExpander.Header>
+                                <StackPanel x:Name="HotKeyRows" KeyboardNavigation.TabNavigation="Continue" />
+                            </ui:CardExpander>
+                        </StackPanel>
+
+                        <!-- Notifications from the tray icon (all off by default) -->
+                        <StackPanel x:Name="NoticesSection">
+                            <TextBlock Style="{StaticResource SectionHeader}" Text="Notifications" />
+                            <ui:CardExpander Icon="{ui:SymbolIcon Symbol=Alert24}" AutomationProperties.Name="Notifications">
+                                <ui:CardExpander.Header>
+                                    <StackPanel>
+                                        <TextBlock Style="{StaticResource CardTitle}" Text="Notifications" />
+                                        <TextBlock x:Name="NoticesHint" Style="{StaticResource Secondary}" />
+                                    </StackPanel>
+                                </ui:CardExpander.Header>
+                                <StackPanel>
+                                    <CheckBox x:Name="NoticeLearnedBox" Tag="Learned" Click="Notice_Click" Margin="0,0,0,4"
+                                              Content="When it learns a new monitor for an app" />
+                                    <CheckBox x:Name="NoticeElsewhereBox" Tag="OpenedElsewhere" Click="Notice_Click" Margin="0,0,0,4"
+                                              Content="When an app opens on another monitor because its own is off" />
+                                    <CheckBox x:Name="NoticeBackBox" Tag="MonitorBack" Click="Notice_Click" Margin="0,0,0,4"
+                                              Content="When a monitor comes back and its windows move back" />
+                                    <CheckBox x:Name="NoticeAdminBox" Tag="AdminApp" Click="Notice_Click" Margin="0,0,0,4"
+                                              Content="When it can't move an app that runs as administrator" />
+                                    <TextBlock Style="{StaticResource Secondary}" Margin="0,6,0,0"
+                                               Text="At most one notification a day for each app. Select a notification to undo what it says." />
+                                </StackPanel>
+                            </ui:CardExpander>
+                        </StackPanel>
+
                         <TextBlock Style="{StaticResource SectionHeader}" Text="Startup" />
                         <ui:CardControl Icon="{ui:SymbolIcon Symbol=Rocket24}">
                             <ui:CardControl.Header>
@@ -243,8 +306,26 @@
 
                         <StackPanel x:Name="RecentPanel" Margin="0,22,0,0">
                             <TextBlock Style="{StaticResource SectionHeader}" Margin="2,0,0,8" Text="Recent activity" />
-                            <ui:Card Padding="16,12">
-                                <TextBlock x:Name="LastActionText" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                            <ui:Card Padding="8,4">
+                                <ItemsControl x:Name="RecentList" AutomationProperties.Name="Recent activity" KeyboardNavigation.TabNavigation="Continue">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="8,8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <ui:SymbolIcon Symbol="{Binding Icon}" FontSize="18" VerticalAlignment="Top" Margin="0,1,12,0" />
+                                                <StackPanel Grid.Column="1">
+                                                    <TextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                                                    <TextBlock Text="{Binding Detail}" Style="{StaticResource Secondary}" />
+                                                </StackPanel>
+                                                <ui:Button Grid.Column="2" Content="Undo" Appearance="Transparent" Margin="8,0,0,0" VerticalAlignment="Center"
+                                                           Click="Undo_Click" Visibility="{Binding CanUndo, Converter={StaticResource ShowWhenTrue}}"
+                                                           AutomationProperties.Name="{Binding UndoName}" ToolTip="{Binding UndoName}" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </ui:Card>
                         </StackPanel>
                     </StackPanel>
@@ -266,6 +347,10 @@
                                                 </StackPanel>
                                             </ui:CardControl.Header>
                                             <StackPanel Orientation="Horizontal">
+                                                <ui:Button Content="Move its windows" Margin="0,0,8,0" Click="MoveMonitorWindows_Click"
+                                                           Visibility="{Binding HasOtherMonitors, Converter={StaticResource ShowWhenTrue}}"
+                                                           AutomationProperties.Name="{Binding Name, StringFormat='Move the windows on {0} to another monitor'}"
+                                                           ToolTip="Move the windows on this monitor to another monitor, once" />
                                                 <ui:Button Content="Name &amp; number" Click="RenameMonitor_Click"
                                                            Visibility="{Binding CanRename, Converter={StaticResource ShowWhenTrue}}"
                                                            AutomationProperties.Name="{Binding Name, StringFormat='Name and number for {0}'}"
@@ -422,6 +507,11 @@
                                         <TextBlock x:Name="SelectedAppDetail" Style="{StaticResource Secondary}" Margin="0,2,0,12" />
                                         <TextBlock Text="Open it on" Margin="0,0,0,6" />
                                         <ComboBox x:Name="TargetCombo" HorizontalAlignment="Stretch" AutomationProperties.Name="Open it on" SelectionChanged="TargetCombo_SelectionChanged" />
+                                        <!-- An app that's open now: move its windows there once, without saving -->
+                                        <ui:Button x:Name="MoveNowButton" Content="Move its windows there now" Margin="0,8,0,0" Visibility="Collapsed"
+                                                   Icon="{ui:SymbolIcon ArrowMove24}" Click="MoveNow_Click"
+                                                   AutomationProperties.Name="Move its open windows to the chosen monitor now, without saving"
+                                                   ToolTip="Moves its open windows once. Where it opens next time only changes when you press Save." />
                                         <!-- Only for "Where I used it last": which monitors the app may open on -->
                                         <StackPanel x:Name="AllowedPanel" Margin="0,12,0,0" Visibility="Collapsed">
                                             <TextBlock x:Name="AllowedIntro" Style="{StaticResource Secondary}" FontSize="13" />

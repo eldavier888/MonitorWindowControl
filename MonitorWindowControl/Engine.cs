@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Threading;
 
 namespace MonitorWindowControl;
@@ -42,6 +43,9 @@ public sealed class Engine : IDisposable
     private static readonly TimeSpan GameHoldMax = TimeSpan.FromMinutes(15); // windows held during a game older than this stay put
     private const int MaxCorrections = 3;        // "Keep correcting for": an app is moved back at most this often per window
     private const double DialogMaxShare = 0.6;   // a dialog this large (of the monitor's width or height) or larger is left alone
+    private const int RecentMax = 10;            // Recent activity keeps this many events (in memory only)
+    private const int ParkedCoordinate = -30000; // windows Windows parks here (minimized) aren't "off-screen"
+    private const int HotKeyBaseId = 0x100;      // keyboard shortcut ids: base + action index * 2 (+1 for the Shift version)
 
     /// <summary>"Treat as switched off: for 1 hour".</summary>
     public static readonly TimeSpan OffForAnHour = TimeSpan.FromHours(1);
@@ -114,6 +118,24 @@ public sealed class Engine : IDisposable
     // Advanced timing: how often in a row each app moved itself back after being moved.
     private readonly Dictionary<string, int> _jumpBacks = new(StringComparer.OrdinalIgnoreCase);
 
+    // Recent activity, with what's needed to undo each event (in memory only; nothing about windows is saved).
+    private readonly List<ActivityEntry> _recent = new();
+    private readonly Dictionary<int, UndoData> _undo = new();
+    private int _nextActivityId = 1;
+    private readonly Dictionary<string, int> _placementUndos = new(StringComparer.OrdinalIgnoreCase); // undone placements per app
+    private readonly HashSet<string> _unlearned = new(StringComparer.OrdinalIgnoreCase); // "app|device" you undid a learn of
+    private readonly Dictionary<string, DateTime> _noticeDay = new(StringComparer.OrdinalIgnoreCase); // a notice per app per day
+
+    // Tidy up: windows you moved yourself this session (left alone unless you ask), and the off-screen check.
+    private readonly HashSet<IntPtr> _movedByYou = new();
+    private bool _rescueDue;
+
+    // Keyboard shortcuts: what's registered now (id → keys), and the last app window in front (for the tray menu).
+    private readonly Dictionary<int, (int Modifiers, int Key)> _hotKeys = new();
+    private readonly HashSet<string> _hotKeyProblems = new(StringComparer.Ordinal);
+    private IntPtr _foregroundHook;
+    private IntPtr _lastAppWindow;
+
     private string? _streakKey, _streakDevice;
     private string? _learnedKey, _learnedDevice; // what the current streak already taught (don't redo it every 2 s)
     private int _streakCount, _tickCount;
@@ -141,6 +163,18 @@ public sealed class Engine : IDisposable
 
     /// <summary>Raised for something worth a tray notice (title, text), such as the main monitor being changed back.</summary>
     public event Action<string, string>? Notice;
+
+    /// <summary>
+    /// Raised (only in the program that places windows) for a Recent activity event that should show a notification:
+    /// one you turned on under Notifications, or feedback for a keyboard shortcut.
+    /// </summary>
+    public event Action<ActivityEntry>? ActivityNotice;
+
+    /// <summary>The last events, newest first (see <see cref="Undo"/>).</summary>
+    public IReadOnlyList<ActivityEntry> Recent => _recent;
+
+    /// <summary>Keyboard shortcuts that another app already uses: an action, or an action + "+Shift".</summary>
+    public IReadOnlyCollection<string> HotKeyProblems => _hotKeyProblems;
 
     /// <summary>True when "Keep my main monitor" stopped because Windows kept making another monitor main.</summary>
     public bool KeepMainStopped => Settings.KeepMainMonitor != null && Settings.KeepMainStopped;
@@ -187,6 +221,25 @@ public sealed class Engine : IDisposable
         public Native.RECT DroppedRect;
         public long ProcessStart;        // a reused window handle belongs to another program
     }
+
+    /// <summary>
+    /// How to undo one Recent activity event: windows to put back where they were, and/or an app's choice to put back
+    /// as it was. Kept in memory only.
+    /// </summary>
+    private sealed class UndoData
+    {
+        public readonly List<(IntPtr Hwnd, WindowSnap Was)> Windows = new();
+        public string? RuleKey;       // this app's choice is put back…
+        public AppRule? RuleBefore;   // …as it was (null = it wasn't saved: forget it again)
+        public bool OnlyMonitor;      // (learned: only its monitor is put back)
+        public string? LearnedOn;     // (learned: the monitor it was learned on, so it isn't learned there again)
+        public string? PlacedApp;     // a new window of this app was placed: undoing that twice asks to stop moving it
+        public string? PlacedAppName;
+        public bool IsEmpty => Windows.Count == 0 && RuleKey == null;
+    }
+
+    /// <summary>What <see cref="Undo"/> did: an error to show, or an app to offer "Never move" for.</summary>
+    public sealed record UndoOutcome(string? Error, string? StopMovingKey, string? StopMovingName);
 
     /// <summary>Where one app window was (kept in memory only).</summary>
     private sealed class WindowSnap
@@ -325,6 +378,11 @@ public sealed class Engine : IDisposable
             // Windows you drag after waking up are left where you put them (only fires when you drag one).
             _moveHook = Native.SetWinEventHook(Native.EVENT_SYSTEM_MOVESIZEEND, Native.EVENT_SYSTEM_MOVESIZEEND, IntPtr.Zero,
                 _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+            // The app window in front, for the tray menu's "Always open on…" (only fires when you switch windows).
+            _foregroundHook = Native.SetWinEventHook(Native.EVENT_SYSTEM_FOREGROUND, Native.EVENT_SYSTEM_FOREGROUND, IntPtr.Zero,
+                _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+            NoteForeground(Native.GetForegroundWindow());
+            UpdateHotKeys();
         }
         return true;
     }
@@ -336,6 +394,9 @@ public sealed class Engine : IDisposable
         if (_hook != IntPtr.Zero) { Native.UnhookWinEvent(_hook); _hook = IntPtr.Zero; }
         if (_moveHook != IntPtr.Zero) { Native.UnhookWinEvent(_moveHook); _moveHook = IntPtr.Zero; }
         if (_uncloakHook != IntPtr.Zero) { Native.UnhookWinEvent(_uncloakHook); _uncloakHook = IntPtr.Zero; }
+        if (_foregroundHook != IntPtr.Zero) { Native.UnhookWinEvent(_foregroundHook); _foregroundHook = IntPtr.Zero; }
+        UnregisterHotKeys();
+        _movedByYou.Clear(); _rescueDue = false; _lastAppWindow = IntPtr.Zero;
         _pending.Clear(); _handled.Clear(); _appWindows.Clear(); _displaced.Clear(); ResetStreak();
         _cloakedNew.Clear(); _signInWindows.Clear(); _signInPlaced.Clear(); _heldForGame.Clear(); _gamePaused = false;
         _positionWindow = IntPtr.Zero; _positionSample = null;
@@ -560,7 +621,7 @@ public sealed class Engine : IDisposable
                 _identityBackfillDue = true;
                 // Once things settle: note the windows of a monitor that went away, move windows back to one that
                 // came back, and check the main monitor.
-                _vanishScanDue = _keepMainDue = true;
+                _vanishScanDue = _keepMainDue = _rescueDue = true;
                 ScheduleReturnCheck();
             }
             _layoutSignature = layout;
@@ -576,6 +637,7 @@ public sealed class Engine : IDisposable
         Log.Write("Monitors: " + string.Join(", ", list.Select(m =>
             $"{m.Label} [{m.DeviceName}{string.Concat(m.Targets.Select(t => $" {t.Connection} {t.Model} {t.Serial}".TrimEnd()))}" +
             $"{(m.IsTemporary ? ", temporary" : "")}{(m.IsSwitchedOff ? ", switched off" : "")}{(m.OnlyChosenApps ? ", only chosen apps" : "")}]")));
+        if (IsMainEngine) UpdateHotKeys(); // (a send-to-monitor shortcut exists for each connected monitor; settings may have changed)
         if (_started) Changed?.Invoke();
     }
 
@@ -803,6 +865,13 @@ public sealed class Engine : IDisposable
         if (eventType == Native.EVENT_SYSTEM_MOVESIZEEND)
         {
             if (_restoreDue) _movedSinceWake.Add(hwnd); // you moved it after waking up: don't put it back
+            _movedByYou.Add(hwnd);                      // "Move open windows to their monitors" leaves it alone
+            return;
+        }
+
+        if (eventType == Native.EVENT_SYSTEM_FOREGROUND)
+        {
+            NoteForeground(hwnd);
             return;
         }
 
@@ -823,6 +892,8 @@ public sealed class Engine : IDisposable
             _snapshot.Remove(hwnd);
             _sleepSnapshot?.Remove(hwnd);
             _movedSinceWake.Remove(hwnd);
+            _movedByYou.Remove(hwnd);
+            if (hwnd == _lastAppWindow) _lastAppWindow = IntPtr.Zero;
             if (_appWindows.Remove(hwnd)) AppWindowsChanged?.Invoke();
             return;
         }
@@ -1026,28 +1097,36 @@ public sealed class Engine : IDisposable
     /// because its app's own monitor can't be used right now (disconnected, switched off, or kept for chosen apps), so it
     /// moves back once that monitor can be used again. <c>ReturnTo</c> is set instead for a window with no monitor of its
     /// own that Windows opened on a switched-off monitor: it goes back there when that monitor is switched on again.
+    /// <c>Plain</c> is the reason in plain words, for Recent activity.
     /// </summary>
-    private (MonitorInfo? Target, string Reason, bool Displaced, MonitorRef? ReturnTo) ChooseTarget(AppRule? rule, MonitorInfo? current,
-        MonitorInfo? pointer)
+    private (MonitorInfo? Target, string Reason, bool Displaced, MonitorRef? ReturnTo, string Plain) ChooseTarget(AppRule? rule,
+        MonitorInfo? current, MonitorInfo? pointer)
     {
         MonitorInfo? target;
-        string reason;
+        string reason, plain;
         bool displaced = false;
         MonitorRef? returnTo = null;
         if (rule is { FollowMouse: true, NeverMove: false })
         {
             (target, reason) = PointerTarget(rule, current, pointer);
+            plain = target != null && pointer != null && target.DeviceName == pointer.DeviceName
+                ? "Set by you: the monitor you're using" : "Set by you: one of the monitors you chose for it";
         }
         else if (rule != null)
         {
             target = ResolveTarget(rule);
             reason = rule.FollowLastUsed ? "where you used it last" : rule.Pinned ? "set by you" : "learned";
+            plain = rule.FollowLastUsed ? "Where you used it last" : rule.Pinned ? "Set by you" : "Learned: you use it there";
             var home = Resolve(rule);
             if (target != null)
             {
                 // "Where I used it last" on another of its monitors, because the last one is off: that one is still home.
                 displaced = rule.FollowLastUsed && home != null && IsAllowed(rule, home) && !CanUse(rule, home);
-                if (displaced) reason += $"; {home!.Name} {WhyNotUsable(rule, home)}, so the next of its monitors";
+                if (displaced)
+                {
+                    reason += $"; {home!.Name} {WhyNotUsable(rule, home)}, so the next of its monitors";
+                    plain = $"{home.Name} {WhyNotUsable(rule, home)}, so the next of its monitors for now";
+                }
             }
             else if (!(rule.FollowLastUsed && rule.MonitorDevice == null)) // (never used yet: leave it)
             {
@@ -1057,22 +1136,28 @@ public sealed class Engine : IDisposable
                 target = FallbackFor(rule, out string where);
                 reason += $"; {why}, so {where}";
                 displaced = target != null;
+                plain = (home == null ? $"{rule.MonitorName ?? "Its monitor"} isn't connected" : $"{home.Name} {WhyNotUsable(rule, home)}")
+                        + $", so {(target == null ? "it's left where it is" : target.IsPrimary ? "the main monitor" : target.Name)} for now";
             }
+            else plain = "Where you used it last (not used yet)";
         }
         else if (Settings.UnknownFollowMouse && pointer != null && CanUse(null, pointer))
         {
             target = pointer;
             reason = "new app → the monitor you're using";
+            plain = "New app: the monitor you're using";
         }
         else if (Settings.MoveUnknownToMain)
         {
             target = FallbackMonitor;
             reason = target?.IsPrimary == true ? "new app → main monitor" : $"new app → {target?.Name} (the main monitor can't be used now)";
+            plain = target?.IsPrimary == true ? "New app: the main monitor" : "New app: the main monitor can't be used now";
         }
         else
         {
             target = null;
             reason = "new app";
+            plain = "New app";
         }
 
         // A window Windows opened on a monitor that's switched off (or kept for other apps) never stays there, even when
@@ -1082,11 +1167,12 @@ public sealed class Engine : IDisposable
         {
             target = stand;
             reason += $"; it opened on {current.Name}, which {WhyNotUsable(rule, current)}";
+            plain = $"It opened on {current.Name}, which {WhyNotUsable(rule, current)}";
             // It counts as displaced too: back to its app's monitor, or (no monitor of its own) to the one it opened on.
             if (rule != null && Resolve(rule) is { } home && !CanUse(rule, home)) displaced = true;
             else if (current.IsSwitchedOff) returnTo = RefTo(current);
         }
-        return (target, reason, displaced, returnTo);
+        return (target, reason, displaced, returnTo, plain);
     }
 
     /// <summary>
@@ -1122,7 +1208,7 @@ public sealed class Engine : IDisposable
     {
         if (rule != null && rule.NeverMove) return;
         bool wantsPointer = rule?.FollowMouse == true || (rule == null && Settings.UnknownFollowMouse);
-        var (target, reason, displaced, returnTo) = ChooseTarget(rule, MonitorOfWindow(hwnd), wantsPointer ? MonitorInUse(p) : null);
+        var (target, reason, displaced, returnTo, plain) = ChooseTarget(rule, MonitorOfWindow(hwnd), wantsPointer ? MonitorInUse(p) : null);
         if (target == null) return;
         if (p.WasHeld) reason += "; held during a display change";
         if (p.AtSignIn) reason += "; it opened while you were signing in";
@@ -1157,6 +1243,7 @@ public sealed class Engine : IDisposable
         if (!CanMoveNew(hwnd, current, app, title, quiet: there)) return;
 
         int generation = _topologyGeneration;
+        var was = there ? null : Snap(hwnd, ProcessStartOf(hwnd)); // (for Undo)
         var result = MovePlaced(hwnd, target, place, there, () => generation == _topologyGeneration);
         string from = current?.Name ?? "?";
         if (result == WindowMover.Result.Aborted)
@@ -1169,7 +1256,14 @@ public sealed class Engine : IDisposable
             RememberDisplaced(hwnd, rule, displaced, returnTo);
             string how = place == null ? "" : place.Value.Spot != null ? ", where you last had it" : ", maximized";
             if (there) Log.Write($"Placed {app.DisplayName} on {target.Name}{how} ({reason}).  {app.Key} \"{title}\"");
-            else Note($"Moved {app.DisplayName} from {from} to {target.Name}{how} ({reason}).", $"{app.Key} \"{title}\"");
+            else
+            {
+                var undo = new UndoData { PlacedApp = app.Key, PlacedAppName = app.DisplayName };
+                if (was != null) undo.Windows.Add((hwnd, was));
+                Record(ActivityKinds.Moved, $"Moved {app.DisplayName} to {target.Name}", plain, undo,
+                       $"Moved {app.DisplayName} from {from} to {target.Name}{how} ({reason}).  {app.Key} \"{title}\"",
+                       displaced ? NoticeOpenedElsewhere : null, app.Key);
+            }
             if (p.AtSignIn) _signInPlaced.Add(app.DisplayName);
             // Check again shortly: some apps restore their saved position after showing ("Keep correcting for").
             Native.GetWindowRect(hwnd, out var placed);
@@ -1197,8 +1291,13 @@ public sealed class Engine : IDisposable
             : !_selfElevated && WindowInfo.IsProcessElevated(WindowInfo.GetPid(hwnd))
                 ? "it runs as administrator, so Windows doesn't allow Monitor Window Control to move it"
             : Native.IsHungAppWindow(hwnd) ? "not responding" : null;
-        if (why != null && !quiet) Log.Write($"Skipped {app.Key} \"{title}\": {why}.");
-        return why == null;
+        if (why == null || quiet) return why == null;
+        if (why.StartsWith("it runs as administrator", StringComparison.Ordinal))
+            Record(ActivityKinds.Skipped, $"Didn't move {app.DisplayName}",
+                   "Skipped: it runs as administrator, and Windows doesn't let other apps move it", null,
+                   $"Skipped {app.Key} \"{title}\": {why}.", NoticeAdminApp, app.Key);
+        else Log.Write($"Skipped {app.Key} \"{title}\": {why}.");
+        return false;
     }
 
     /// <summary>"Place it" for one app on one monitor: a remembered spot and/or maximized. Null = centered.</summary>
@@ -1428,6 +1527,7 @@ public sealed class Engine : IDisposable
         if (++_tickCount % 30 == 0) // safety net, ~every minute
         {
             _handled.RemoveWhere(h => !Native.IsWindow(h));
+            _movedByYou.RemoveWhere(h => !Native.IsWindow(h));
             foreach (var gone in _displaced.Keys.Where(h => !Native.IsWindow(h)).ToList()) _displaced.Remove(gone);
             ForgetOldCloakedWindows();
         }
@@ -1578,6 +1678,8 @@ public sealed class Engine : IDisposable
         // It's there only because its own monitor couldn't be used: that's not a choice. (Drag it elsewhere and it is.)
         if (_displaced.TryGetValue(hwnd, out var displaced)
             && string.Equals(displaced.DroppedDevice, mon.DeviceName, StringComparison.OrdinalIgnoreCase)) return;
+        // You undid learning it on this monitor: it isn't learned there again this session.
+        if (_unlearned.Contains(app.Key + "|" + mon.DeviceName)) return;
         if (rule != null && rule.FollowLastUsed)
         {
             // Remember the last monitor you used it on, if it's one of the monitors you picked for it.
@@ -1585,10 +1687,13 @@ public sealed class Engine : IDisposable
             if (!IsAllowed(rule, mon) || Resolve(rule)?.DeviceName == mon.DeviceName) return;
             if ((mon.IsTemporary || mon.OnlyChosenApps) && rule.AllowedMonitors.Count == 0) return;
             string? was = rule.MonitorName ?? rule.MonitorDevice;
+            var lastBefore = CopyRule(rule);
             SetMonitor(rule, mon); rule.UpdatedUtc = DateTime.UtcNow;
             Save();
-            Log.Write($"Last used: {rule.DisplayName} is now on {mon.Name}{(was == null ? "" : $" (was {was})")}, so it opens there next.  [{rule.Key} {mon.DeviceName}]");
-            Changed?.Invoke();
+            Record(ActivityKinds.Learned, $"{rule.DisplayName} opens on {mon.Name} next", "Where you used it last: you used it there",
+                   new UndoData { RuleKey = rule.Key, RuleBefore = lastBefore, OnlyMonitor = true, LearnedOn = mon.DeviceName },
+                   $"Last used: {rule.DisplayName} is now on {mon.Name}{(was == null ? "" : $" (was {was})")}, so it opens there next.  [{rule.Key} {mon.DeviceName}]",
+                   NoticeLearned, rule.Key);
             return;
         }
         if (!Settings.LearnAutomatically) return;
@@ -1606,7 +1711,8 @@ public sealed class Engine : IDisposable
             return;
         }
 
-        string? old = rule == null ? null : (rule.MonitorName ?? rule.MonitorDevice);
+        string? old = rule == null ? null : (Resolve(rule)?.Name ?? rule.MonitorName ?? rule.MonitorDevice);
+        var before = rule == null ? null : CopyRule(rule);
         if (rule == null) { rule = new AppRule { Key = app.Key, LaunchTarget = WindowInfo.GetLaunchTarget(hwnd) }; Settings.Apps.Add(rule); }
         bool keepName = app.Key.StartsWith(WindowInfo.WebAppKeyPrefix, StringComparison.Ordinal)
                         && !string.IsNullOrWhiteSpace(rule.DisplayName) && rule.DisplayName != rule.Key;
@@ -1614,10 +1720,12 @@ public sealed class Engine : IDisposable
         SetMonitor(rule, mon);
         rule.UpdatedUtc = DateTime.UtcNow;
         Save();
-        Note(old == null
-            ? $"Learned: {app.DisplayName} opens on {mon.Name}."
-            : $"Learned: {app.DisplayName} now opens on {mon.Name} (was {old}).", $"[{app.Key} {mon.DeviceName}]");
-        Changed?.Invoke();
+        Record(ActivityKinds.Learned, old == null ? $"{app.DisplayName} opens on {mon.Name}" : $"{app.DisplayName} now opens on {mon.Name}",
+               old == null ? "Learned: you used it there for a few seconds" : $"Learned: you used it there for a few seconds (it was {old})",
+               new UndoData { RuleKey = app.Key, RuleBefore = before, OnlyMonitor = true, LearnedOn = mon.DeviceName },
+               (old == null ? $"Learned: {app.DisplayName} opens on {mon.Name}." : $"Learned: {app.DisplayName} now opens on {mon.Name} (was {old}).")
+               + $"  [{app.Key} {mon.DeviceName}]",
+               NoticeLearned, app.Key);
     }
 
     // ------------------------------------------------------------------ monitors coming back, sleep, main monitor
@@ -1679,6 +1787,7 @@ public sealed class Engine : IDisposable
         if (_keepMainDue) { _keepMainDue = false; EnforceMainMonitor(now); }
         if (_restoreDue) { RestoreAfterSleepTick(now); return; }
         if (_returnCheckDue && now >= _returnNotBeforeUtc) { _returnCheckDue = false; MoveDisplacedBack(); }
+        if (_rescueDue && !_returnCheckDue) { _rescueDue = false; RescueOffScreenWindows(); }
     }
 
     /// <summary>Snapshots aren't taken while monitors are changing or just changed, so they never record a pile-up.</summary>
@@ -1805,6 +1914,7 @@ public sealed class Engine : IDisposable
         if (_displaced.Count == 0 || !Settings.Enabled || IsRemoteSession) return;
         int generation = _topologyGeneration;
         var movedTo = new Dictionary<string, List<string>>();
+        var undoFor = new Dictionary<string, UndoData>();
         foreach (var (h, d) in _displaced.ToList())
         {
             var (home, forget) = HomeOf(d);
@@ -1816,6 +1926,7 @@ public sealed class Engine : IDisposable
             if (current != null && current.DeviceName == home.DeviceName) continue;               // already back
             if (!Native.GetWindowRect(h, out var now) || !SameRect(now, d.DroppedRect)) continue; // you moved it
             if (!CanMoveNow(h, current)) continue;
+            var before = Snap(h, d.ProcessStart);
             var result = PutBack(h, d.Saved, home, generation);
             if (result == WindowMover.Result.Aborted)
             {
@@ -1826,9 +1937,16 @@ public sealed class Engine : IDisposable
             if (result != WindowMover.Result.Moved) continue;
             if (!movedTo.TryGetValue(home.Name, out var names)) movedTo[home.Name] = names = new List<string>();
             names.Add(WindowInfo.Identify(h)?.DisplayName ?? "a window");
+            if (!undoFor.TryGetValue(home.Name, out var undo)) undoFor[home.Name] = undo = new UndoData();
+            if (before != null) undo.Windows.Add((h, before));
         }
         foreach (var (monitor, names) in movedTo)
-            Note($"{monitor} is back: moved {string.Join(", ", names.Distinct())} back there.", "");
+        {
+            string list = string.Join(", ", names.Distinct());
+            Record(ActivityKinds.Back, $"{monitor} is back: moved {list} back there", "When a monitor comes back, its windows move back",
+                   undoFor.TryGetValue(monitor, out var undo) && !undo.IsEmpty ? undo : null,
+                   $"{monitor} is back: moved {list} back there.", NoticeMonitorBack, monitor);
+        }
     }
 
     /// <summary>Windows that are never moved behind your back: minimized, fullscreen, not responding, or run as administrator.</summary>
@@ -1894,6 +2012,7 @@ public sealed class Engine : IDisposable
     {
         int generation = _topologyGeneration;
         var names = new List<string>();
+        var undo = new UndoData();
         foreach (var (h, s) in snap.ToList()) // (a copy: window events can arrive while a move waits for an app)
         {
             if (!SameWindow(h, s.ProcessStart) || !baseline.TryGetValue(h, out var before)) continue;
@@ -1910,15 +2029,20 @@ public sealed class Engine : IDisposable
             if (onTarget && (s.Maximized ? Native.IsZoomed(h) : SameRect(now, s.Rect))) continue; // already where it was
             if (onTarget && !SameRect(s.MonitorBounds, target.Bounds)) continue; // that monitor changed size: can't tell where
             if (!CanMoveNow(h, current)) continue;
+            var was = Snap(h, s.ProcessStart);
             var result = PutBack(h, s, target, generation);
             if (result == WindowMover.Result.Aborted) break; // monitors changed again
             if (result != WindowMover.Result.Moved) continue;
             _displaced.Remove(h);
             names.Add(WindowInfo.Identify(h)?.DisplayName ?? "a window");
+            if (was != null) undo.Windows.Add((h, was));
         }
         if (names.Count > 0)
-            Note($"After sleep: put {names.Count} window{(names.Count == 1 ? "" : "s")} back where {(names.Count == 1 ? "it was" : "they were")} " +
-                 $"({string.Join(", ", names.Distinct())}).", "");
+        {
+            string text = $"After sleep: put {names.Count} window{(names.Count == 1 ? "" : "s")} back where {(names.Count == 1 ? "it was" : "they were")}";
+            Record(ActivityKinds.Back, text, $"Put windows back after sleep ({string.Join(", ", names.Distinct())})",
+                   undo.IsEmpty ? null : undo, $"{text} ({string.Join(", ", names.Distinct())}).");
+        }
     }
 
     /// <summary>
@@ -1973,6 +2097,631 @@ public sealed class Engine : IDisposable
         if (back.Count == 0) return;
         if (IsMainEngine) Note($"{string.Join(", ", back)}: the hour is over, so it's treated as switched on again.", "");
         Changed?.Invoke();
+    }
+
+    // ------------------------------------------------------------------ Recent activity and Undo
+
+    /// <summary>Which Notifications choice an event belongs to (see <see cref="NoticeSettings"/>).</summary>
+    private const string NoticeLearned = "Learned", NoticeOpenedElsewhere = "OpenedElsewhere",
+                         NoticeMonitorBack = "MonitorBack", NoticeAdminApp = "AdminApp";
+
+    /// <summary>
+    /// Adds an event to Recent activity (the last 10, in memory only) and writes <paramref name="log"/> to the log.
+    /// With <paramref name="undo"/>, the event can be undone. <paramref name="notice"/> names the Notifications choice
+    /// that shows it from the tray icon (at most once a day per app or monitor, <paramref name="noticeKey"/>).
+    /// </summary>
+    private ActivityEntry Record(string kind, string text, string reason, UndoData? undo, string log,
+        string? notice = null, string? noticeKey = null)
+    {
+        if (undo is { IsEmpty: true }) undo = null;
+        var entry = new ActivityEntry { Id = _nextActivityId++, Time = DateTime.Now, Kind = kind, Text = text, Reason = reason, CanUndo = undo != null };
+        _recent.Insert(0, entry);
+        if (undo != null) _undo[entry.Id] = undo;
+        while (_recent.Count > RecentMax)
+        {
+            _undo.Remove(_recent[^1].Id);
+            _recent.RemoveAt(_recent.Count - 1);
+        }
+        LastAction = $"{entry.Time:HH:mm}  {text}";
+        Log.Write(log);
+        Changed?.Invoke();
+        if (notice != null) MaybeNotify(entry, notice, noticeKey ?? "");
+        return entry;
+    }
+
+    /// <summary>Shows a notification for an event, if you turned that kind on (only in tray mode, at most once a day per app).</summary>
+    private void MaybeNotify(ActivityEntry entry, string notice, string key)
+    {
+        if (!IsMainEngine || ActivityNotice == null) return; // the helper has no tray icon: it's in Recent activity instead
+        var n = Settings.Notices;
+        bool on = notice switch
+        {
+            NoticeLearned => n.Learned, NoticeOpenedElsewhere => n.OpenedElsewhere,
+            NoticeMonitorBack => n.MonitorBack, NoticeAdminApp => n.AdminApp, _ => false,
+        };
+        if (!on) return;
+        string k = notice + "|" + key;
+        var today = DateTime.Now.Date;
+        if (_noticeDay.TryGetValue(k, out var shown) && shown == today) return;
+        _noticeDay[k] = today;
+        ActivityNotice(entry);
+    }
+
+    /// <summary>Feedback for something you did with a keyboard shortcut: always shown (in tray mode).</summary>
+    private void Announce(ActivityEntry entry)
+    {
+        if (IsMainEngine) ActivityNotice?.Invoke(entry);
+    }
+
+    /// <summary>"1 window", "3 windows".</summary>
+    private static string Windows(int n) => n == 1 ? "1 window" : $"{n} windows";
+
+    /// <summary>A copy of a saved app's choices (to put them back on Undo).</summary>
+    private static AppRule CopyRule(AppRule rule) =>
+        JsonSerializer.Deserialize(JsonSerializer.Serialize(rule, SettingsJson.Default.AppRule), SettingsJson.Default.AppRule)!;
+
+    /// <summary>
+    /// Undoes a Recent activity event: windows go back where they were (if they're still open, belong to the same
+    /// program, and their monitor is connected), and an app's choice goes back to what it was. Undoing the placement of
+    /// an app's new windows twice offers to stop moving that app (<see cref="UndoOutcome.StopMovingKey"/>).
+    /// </summary>
+    public UndoOutcome Undo(int id)
+    {
+        var entry = _recent.FirstOrDefault(e => e.Id == id);
+        if (entry == null || entry.Undone || !_undo.Remove(id, out var u))
+            return new UndoOutcome("This can't be undone any more.", null, null);
+        entry.CanUndo = false;
+        string? error = u.RuleKey != null ? RestoreRule(u) : null;
+        bool ruleDone = u.RuleKey != null && error == null;
+        int back = error == null ? PutWindowsBack(u) : 0;
+        if (error == null && u.Windows.Count > 0 && back == 0)
+            error = u.Windows.Count == 1
+                ? "The window couldn't be moved back. It may have been closed, or the monitor it was on isn't connected any more."
+                : "The windows couldn't be moved back. They may have been closed, or the monitor they were on isn't connected any more.";
+        entry.Undone = ruleDone || back > 0;
+        Log.Write($"Undo: {entry.Text}" + (error == null ? "." : $". {error}"));
+
+        string? askKey = null, askName = null;
+        if (u.PlacedApp != null && back > 0)
+        {
+            int n = (_placementUndos.TryGetValue(u.PlacedApp, out int c) ? c : 0) + 1;
+            if (n >= 2 && Settings.Find(u.PlacedApp)?.NeverMove != true) { askKey = u.PlacedApp; askName = u.PlacedAppName; n = 0; }
+            _placementUndos[u.PlacedApp] = n;
+        }
+        Changed?.Invoke();
+        return new UndoOutcome(error, askKey, askName);
+    }
+
+    /// <summary>Puts an app's choice back as it was before the event. Returns a problem to show, or null.</summary>
+    private string? RestoreRule(UndoData u)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var now = Settings.Find(u.RuleKey!);
+        var before = u.RuleBefore;
+        static string Choice(AppRule? r) => r == null ? "" : $"{r.Pinned}{r.NeverMove}{r.FollowLastUsed}{r.FollowMouse}";
+        if (u.OnlyMonitor)
+        {
+            // Learned: only its monitor goes back, and only if you haven't chosen something yourself since.
+            if (now == null) return "It was forgotten since, so there's nothing to undo.";
+            if (Choice(now) != Choice(before ?? new AppRule())) return $"You've chosen where {now.DisplayName} opens since, so your choice was kept.";
+            if (before == null) Settings.Apps.Remove(now);
+            else
+            {
+                now.MonitorDevice = before.MonitorDevice; now.MonitorName = before.MonitorName; now.MonitorHardware = before.MonitorHardware;
+                now.UpdatedUtc = DateTime.UtcNow;
+            }
+            if (u.LearnedOn != null) _unlearned.Add(u.RuleKey + "|" + u.LearnedOn);
+        }
+        else
+        {
+            if (before == null && now?.ShortcutFile != null)
+                return $"{now.DisplayName} has a launch shortcut now. To remove it, select it on the Apps page and press Forget.";
+            if (now != null) Settings.Apps.Remove(now);
+            if (before != null)
+            {
+                var restored = CopyRule(before);
+                if (now != null) { restored.ShortcutFile = now.ShortcutFile; restored.LaunchTarget ??= now.LaunchTarget; }
+                Settings.Apps.Add(restored);
+            }
+        }
+        Save();
+        ResetStreak();
+        return null;
+    }
+
+    /// <summary>Moves the windows of an Undo back where they were. Returns how many are back.</summary>
+    private int PutWindowsBack(UndoData u)
+    {
+        int back = 0, generation = _topologyGeneration;
+        foreach (var (h, was) in u.Windows)
+        {
+            if (!SameWindow(h, was.ProcessStart)) continue; // closed, or the handle now belongs to another program
+            var m = FindMonitor(was.Monitor);
+            if (m == null || Native.IsIconic(h)) continue;
+            var current = MonitorOfWindow(h);
+            if (current?.DeviceName == m.DeviceName && Native.GetWindowRect(h, out var r) && SameRect(r, was.Rect)) { back++; continue; }
+            if (!CanMoveNow(h, null) || PutBack(h, was, m, generation) != WindowMover.Result.Moved) continue;
+            back++;
+            _pending.Remove(h); _handled.Add(h); _displaced.Remove(h);
+            _movedByYou.Add(h); // where you wanted it: "Move open windows to their monitors" leaves it there
+        }
+        return back;
+    }
+
+    // ------------------------------------------------------------------ tidy up
+
+    /// <summary>One window "Move open windows to their monitors" would move.</summary>
+    private sealed record TidyMove(IntPtr Hwnd, AppIdentity App, AppRule? Rule, MonitorInfo From, MonitorInfo To,
+        bool Displaced, MonitorRef? ReturnTo, string Reason);
+
+    /// <summary>
+    /// The windows that aren't on their app's monitor: each app's choice applied once, like for a new window. Left alone:
+    /// apps set to "Never move", apps it hasn't learned (unless they're on a monitor that can't be used), minimized,
+    /// fullscreen, not-responding and administrator windows, windows on other virtual desktops, and (unless
+    /// <paramref name="includeMoved"/>) windows you moved yourself this session.
+    /// </summary>
+    private List<TidyMove> TidyPlan(bool includeMoved)
+    {
+        var plan = new List<TidyMove>();
+        foreach (var h in WindowInfo.EnumTopLevel())
+        {
+            if (!includeMoved && _movedByYou.Contains(h)) continue;
+            if (Native.IsIconic(h) || WindowInfo.Classify(h, _ownPid) != WindowInfo.Kind.AppWindow) continue;
+            var app = WindowInfo.Identify(h);
+            if (app == null) continue;
+            var rule = Settings.Find(app.Key);
+            if (rule?.NeverMove == true) continue;
+            var current = MonitorOfWindow(h);
+            if (current == null) continue;
+            var (to, reason, displaced, returnTo, _) = rule != null || !CanUse(null, current) ? ChooseTarget(rule, current, null) : default;
+            if (to == null || to.DeviceName == current.DeviceName) continue;
+            if (!CanMoveNow(h, current) || !WindowInfo.IsOnCurrentDesktop(h)) continue;
+            plan.Add(new TidyMove(h, app, rule, current, to, displaced, returnTo, reason));
+        }
+        return plan;
+    }
+
+    /// <summary>How many windows "Move open windows to their monitors" would move now (the preview).</summary>
+    public int TidyCount(bool includeMoved) => TidyPlan(includeMoved).Count;
+
+    /// <summary>"Move open windows to their monitors": moves each window in <see cref="TidyPlan"/> once. Returns how many moved.</summary>
+    public int TidyUp(bool includeMoved)
+    {
+        var undo = new UndoData();
+        var names = new List<string>();
+        int generation = _topologyGeneration;
+        foreach (var t in TidyPlan(includeMoved))
+        {
+            var before = Snap(t.Hwnd, ProcessStartOf(t.Hwnd));
+            var result = MovePlaced(t.Hwnd, t.To, PlacementFor(t.Rule, t.To), false, () => generation == _topologyGeneration);
+            if (result == WindowMover.Result.Aborted) break; // monitors are changing: stop here
+            if (result != WindowMover.Result.Moved) continue;
+            _pending.Remove(t.Hwnd); _handled.Add(t.Hwnd); _displaced.Remove(t.Hwnd);
+            RememberDisplaced(t.Hwnd, t.Rule, t.Displaced, t.ReturnTo);
+            if (before != null) undo.Windows.Add((t.Hwnd, before));
+            names.Add(t.App.DisplayName);
+            Log.Write($"Tidy up: moved {t.App.Key} \"{WindowInfo.GetTitle(t.Hwnd)}\" from {t.From.Name} to {t.To.Name} ({t.Reason}).");
+        }
+        if (names.Count == 0)
+        {
+            Log.Write("Move open windows to their monitors: nothing to move.");
+            return 0;
+        }
+        string list = string.Join(", ", names.Distinct());
+        Record(ActivityKinds.Moved, $"Moved {Windows(names.Count)} to their monitors", $"You chose Move open windows to their monitors ({list})",
+               undo, $"Moved {Windows(names.Count)} to their monitors ({list}).");
+        return names.Count;
+    }
+
+    /// <summary>
+    /// "Bring all windows to this monitor" (<paramref name="from"/> null) or "Move its windows to…" (only the windows on
+    /// <paramref name="from"/>): moves those app windows to <paramref name="target"/>, without changing any app's
+    /// monitor. Apps set to "Never move", minimized, fullscreen, administrator windows and other virtual desktops are left
+    /// alone. Returns how many moved.
+    /// </summary>
+    public int MoveWindowsTo(MonitorInfo target, MonitorInfo? from)
+    {
+        target = MonitorByDevice(target.DeviceName) ?? target;
+        var undo = new UndoData();
+        var names = new List<string>();
+        int generation = _topologyGeneration;
+        foreach (var h in WindowInfo.EnumTopLevel())
+        {
+            if (Native.IsIconic(h) || WindowInfo.Classify(h, _ownPid) != WindowInfo.Kind.AppWindow) continue;
+            var current = MonitorOfWindow(h);
+            if (current?.DeviceName == target.DeviceName) continue;
+            if (from != null && current?.DeviceName != from.DeviceName) continue;
+            var app = WindowInfo.Identify(h);
+            if (app == null) continue;
+            var rule = Settings.Find(app.Key);
+            if (rule?.NeverMove == true || !CanMoveNow(h, current) || !WindowInfo.IsOnCurrentDesktop(h)) continue;
+            var before = Snap(h, ProcessStartOf(h));
+            var result = MovePlaced(h, target, PlacementFor(rule, target), false, () => generation == _topologyGeneration);
+            if (result == WindowMover.Result.Aborted) break;
+            if (result != WindowMover.Result.Moved) continue;
+            _pending.Remove(h); _handled.Add(h); _displaced.Remove(h);
+            _movedByYou.Add(h);
+            if (before != null) undo.Windows.Add((h, before));
+            names.Add(app.DisplayName);
+        }
+        if (names.Count == 0) return 0;
+        string list = string.Join(", ", names.Distinct());
+        string text = from == null ? $"Brought {Windows(names.Count)} to {target.Name}" : $"Moved {Windows(names.Count)} from {from.Name} to {target.Name}";
+        Record(ActivityKinds.Moved, text, $"You asked for it ({list}). Apps still open on their own monitors next time.", undo, $"{text} ({list}).");
+        return names.Count;
+    }
+
+    /// <summary>Moves one app's open windows to a monitor now, without saving it as the app's monitor. Returns how many moved.</summary>
+    public int MoveAppWindowsTo(string key, string? displayName, MonitorInfo target)
+    {
+        target = MonitorByDevice(target.DeviceName) ?? target;
+        var rule = Settings.Find(key);
+        var undo = new UndoData();
+        undo.Windows.AddRange(MoveOpenWindows(key, rule, target, "you asked for it"));
+        foreach (var (h, _) in undo.Windows) _movedByYou.Add(h);
+        if (undo.Windows.Count == 0) return 0;
+        string name = rule?.DisplayName ?? displayName ?? key;
+        Record(ActivityKinds.Moved, $"Moved {name} to {target.Name}", "You asked for it on the Apps page; where it opens next time didn't change",
+               undo, $"Moved {Windows(undo.Windows.Count)} of {name} to {target.Name} (you asked for it).  [{key}]");
+        return undo.Windows.Count;
+    }
+
+    /// <summary>
+    /// After monitors have settled from a change: app windows that ended up outside every monitor (a resolution change,
+    /// a monitor that went away) are moved to their app's monitor, or the main monitor. Minimized ones get a new place to
+    /// open from, without being restored. Apps set to "Never move" and windows on other virtual desktops are left alone.
+    /// </summary>
+    private void RescueOffScreenWindows()
+    {
+        if (!Settings.Enabled || IsRemoteSession || _monitors.Count == 0) return;
+        int generation = _topologyGeneration;
+        var names = new List<string>();
+        foreach (var h in WindowInfo.EnumTopLevel())
+        {
+            bool minimized = Native.IsIconic(h);
+            var wp = new Native.WINDOWPLACEMENT { length = Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
+            if (minimized ? !Native.GetWindowPlacement(h, ref wp) || !OffScreen(wp.rcNormalPosition) : !IsOffScreen(h)) continue;
+            if (WindowInfo.Classify(h, _ownPid) != WindowInfo.Kind.AppWindow) continue;
+            var app = WindowInfo.Identify(h);
+            if (app == null) continue;
+            var rule = Settings.Find(app.Key);
+            if (rule?.NeverMove == true || !WindowInfo.IsOnCurrentDesktop(h)) continue;
+            var target = (rule == null ? null : ResolveTarget(rule)) ?? FallbackMonitor;
+            if (target == null || Native.IsHungAppWindow(h) || (!_selfElevated && WindowInfo.IsProcessElevated(WindowInfo.GetPid(h)))) continue;
+            bool moved = minimized
+                ? MoveMinimizedOnto(h, wp, target)
+                : WindowMover.Move(h, target, () => generation == _topologyGeneration) == WindowMover.Result.Moved;
+            if (!moved) continue;
+            _displaced.Remove(h);
+            names.Add(app.DisplayName);
+            Log.Write($"{app.Key} \"{WindowInfo.GetTitle(h)}\" was outside every monitor; moved it to {target.Name}{(minimized ? " (it's still minimized)" : "")}.");
+        }
+        if (names.Count == 0) return;
+        string list = string.Join(", ", names.Distinct());
+        Record(ActivityKinds.Moved, $"Moved {list} back onto your monitors", "After monitors changed, it was outside every monitor", null,
+               $"Moved {Windows(names.Count)} that were outside every monitor back onto your monitors ({list}).");
+    }
+
+    /// <summary>True if the window (not minimized) is outside every monitor. Windows Windows parks far away don't count.</summary>
+    private static bool IsOffScreen(IntPtr h) => Native.GetWindowRect(h, out var r) && OffScreen(r);
+
+    private static bool OffScreen(Native.RECT r)
+    {
+        if (r.Width <= 0 || r.Height <= 0 || r.Left <= ParkedCoordinate || r.Top <= ParkedCoordinate) return false;
+        return Native.MonitorFromRect(ref r, Native.MONITOR_DEFAULTTONULL) == IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// A minimized window whose restored position is outside every monitor: its restored position is centred on the
+    /// target (sized to fit), and it stays minimized.
+    /// </summary>
+    private static bool MoveMinimizedOnto(IntPtr h, Native.WINDOWPLACEMENT wp, MonitorInfo target)
+    {
+        if (!WindowMover.Responds(h)) return false;
+        var work = target.Work;
+        var r = wp.rcNormalPosition;
+        int w = Math.Min(r.Width, work.Width), ht = Math.Min(r.Height, work.Height);
+        // (Restored positions are in "workspace" coordinates: screen coordinates shifted by a taskbar at the top or left.)
+        int left = work.Left + (work.Width - w) / 2 - (work.Left - target.Bounds.Left);
+        int top = work.Top + (work.Height - ht) / 2 - (work.Top - target.Bounds.Top);
+        wp.rcNormalPosition = new Native.RECT { Left = left, Top = top, Right = left + w, Bottom = top + ht };
+        wp.showCmd = Native.SW_SHOWMINNOACTIVE;
+        wp.flags = 0;
+        return Native.SetWindowPlacement(h, ref wp);
+    }
+
+    // ------------------------------------------------------------------ keyboard shortcuts
+
+    private static int HotKeyId(int index, bool save) => HotKeyBaseId + index * 2 + (save ? 1 : 0);
+
+    /// <summary>
+    /// Registers the keyboard shortcuts you turned on, and only those (and only in the program that places windows):
+    /// a send-to-monitor shortcut for each connected monitor, next and previous, and "Move open windows to their
+    /// monitors", each send shortcut also with Shift. Shortcuts another app already uses are noted in
+    /// <see cref="HotKeyProblems"/> and tried again the next time monitors or settings change.
+    /// </summary>
+    private void UpdateHotKeys()
+    {
+        var want = new Dictionary<int, (int Modifiers, int Key)>();
+        var hk = Settings.HotKeys;
+        if (IsMainEngine && hk.Enabled && OnlyAppKey == null && _monitors.Count > 1)
+        {
+            for (int i = 0; i < HotKeyActions.All.Length; i++)
+            {
+                string action = HotKeyActions.All[i];
+                if (HotKeyActions.MonitorNumber(action) > _monitors.Count) continue;
+                var (mods, key) = HotKeyActions.KeysFor(hk, action);
+                if (key == 0) continue;
+                want[HotKeyId(i, false)] = (mods, key);
+                if (HotKeyActions.HasSaveVersion(action)) want[HotKeyId(i, true)] = (mods | HotKeyActions.Shift, key);
+            }
+        }
+        foreach (var id in _hotKeys.Keys.ToList())
+        {
+            if (want.TryGetValue(id, out var k) && k == _hotKeys[id]) continue;
+            _host.UnregisterHotKey(id);
+            _hotKeys.Remove(id);
+        }
+        var problems = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (id, k) in want)
+        {
+            if (_hotKeys.ContainsKey(id)) continue;
+            if (_host.RegisterHotKey(id, k.Modifiers | Native.MOD_NOREPEAT, k.Key)) _hotKeys[id] = k;
+            else problems.Add(HotKeyProblemName(id));
+        }
+        if (problems.SetEquals(_hotKeyProblems)) return;
+        foreach (var p in problems.Except(_hotKeyProblems))
+            Log.Write($"Keyboard shortcut {HotKeyText(p)} is in use by another app, so it doesn't work here.");
+        _hotKeyProblems.Clear();
+        _hotKeyProblems.UnionWith(problems);
+        Changed?.Invoke();
+    }
+
+    /// <summary>"Monitor2" or "Monitor2+Shift" for a shortcut id.</summary>
+    private static string HotKeyProblemName(int id)
+    {
+        int n = id - HotKeyBaseId;
+        return HotKeyActions.All[n / 2] + (n % 2 == 1 ? "+Shift" : "");
+    }
+
+    /// <summary>The keys of a <see cref="HotKeyProblems"/> entry, in words.</summary>
+    private string HotKeyText(string problem)
+    {
+        bool shift = problem.EndsWith("+Shift", StringComparison.Ordinal);
+        var (mods, key) = HotKeyActions.KeysFor(Settings.HotKeys, shift ? problem[..^6] : problem);
+        return HotKeyActions.Text(mods | (shift ? HotKeyActions.Shift : 0), key);
+    }
+
+    private void UnregisterHotKeys()
+    {
+        foreach (var id in _hotKeys.Keys) _host.UnregisterHotKey(id);
+        _hotKeys.Clear();
+        _hotKeyProblems.Clear();
+    }
+
+    /// <summary>The host calls this when one of the keyboard shortcuts is pressed.</summary>
+    public void OnHotKey(int id)
+    {
+        if (_disposed || !IsMainEngine) return;
+        int n = id - HotKeyBaseId;
+        if (n < 0 || n / 2 >= HotKeyActions.All.Length) return;
+        string action = HotKeyActions.All[n / 2];
+        ReloadIfChanged();
+        if (action == HotKeyActions.Tidy)
+        {
+            int moved = TidyUp(includeMoved: false);
+            Announce(moved > 0 ? _recent[0] : new ActivityEntry { Text = "Open windows are already on their monitors", Kind = ActivityKinds.Info });
+            return;
+        }
+        SendForeground(action, save: n % 2 == 1);
+    }
+
+    /// <summary>
+    /// The monitor for "send to monitor <paramref name="n"/>": the monitor you gave number n, else the n-th monitor in
+    /// the order the Monitors page shows them.
+    /// </summary>
+    public MonitorInfo? MonitorForShortcut(int n) =>
+        _monitors.FirstOrDefault(m => m.Number == n) ?? (n >= 1 && n <= _monitors.Count ? _monitors[n - 1] : null);
+
+    /// <summary>The next (or previous) monitor after <paramref name="current"/>, in your order, going round.</summary>
+    private MonitorInfo? NextMonitor(MonitorInfo? current, int step)
+    {
+        if (_monitors.Count < 2) return null;
+        int i = current == null ? 0 : _monitors.FindIndex(m => m.DeviceName == current.DeviceName);
+        return _monitors[((Math.Max(i, 0) + step) % _monitors.Count + _monitors.Count) % _monitors.Count];
+    }
+
+    /// <summary>
+    /// A send-to-monitor shortcut: moves the window you're using to that monitor (sized for it, keeping it maximized,
+    /// at the spot you last had it there if the app is set to that). With <paramref name="save"/> (Shift), that monitor
+    /// also becomes the app's monitor ("Set by you"), and its other open windows move there too.
+    /// </summary>
+    private void SendForeground(string action, bool save)
+    {
+        IntPtr fg = Native.GetForegroundWindow();
+        if (fg == IntPtr.Zero || WindowInfo.Classify(fg, _ownPid) != WindowInfo.Kind.AppWindow || Native.IsIconic(fg))
+        {
+            Log.Write("Keyboard shortcut: the window in front isn't an app's window, so nothing was moved.");
+            return;
+        }
+        var app = WindowInfo.Identify(fg);
+        if (app == null) return;
+        var current = MonitorOfWindow(fg);
+        int number = HotKeyActions.MonitorNumber(action);
+        var target = number > 0 ? MonitorForShortcut(number) : NextMonitor(current, action == HotKeyActions.Next ? 1 : -1);
+        if (target == null) return;
+        if (!_selfElevated && WindowInfo.IsProcessElevated(WindowInfo.GetPid(fg)))
+        {
+            Announce(Record(ActivityKinds.Skipped, $"Couldn't move {app.DisplayName}",
+                            "It runs as administrator, and Windows doesn't let other apps move it", null,
+                            $"Keyboard shortcut: couldn't move {app.Key}: it runs as administrator."));
+            return;
+        }
+
+        var undo = new UndoData();
+        if (current?.DeviceName != target.DeviceName)
+        {
+            if (Native.IsHungAppWindow(fg)) return;
+            var before = Snap(fg, ProcessStartOf(fg));
+            int generation = _topologyGeneration;
+            var result = MovePlaced(fg, target, PlacementFor(Settings.Find(app.Key), target), false, () => generation == _topologyGeneration);
+            if (result != WindowMover.Result.Moved)
+            {
+                Log.Write($"Keyboard shortcut: couldn't move {app.Key} to {target.Name}.");
+                return;
+            }
+            _pending.Remove(fg); _handled.Add(fg); _displaced.Remove(fg);
+            _movedByYou.Add(fg);
+            if (before != null) undo.Windows.Add((fg, before));
+        }
+        if (!save)
+        {
+            if (!undo.IsEmpty)
+                Record(ActivityKinds.Moved, $"Sent {app.DisplayName} to {target.Name}", "Keyboard shortcut", undo,
+                       $"Keyboard shortcut: sent {app.DisplayName} to {target.Name}.  [{app.Key} {target.DeviceName}]");
+            return;
+        }
+        using (SettingsStore.Lock())
+        {
+            ReloadIfChanged();
+            var pinned = PinCore(app.Key, target, app.DisplayName, out _, out _);
+            undo.RuleKey = pinned.RuleKey; undo.RuleBefore = pinned.RuleBefore;
+            undo.Windows.AddRange(pinned.Windows);
+        }
+        Announce(Record(ActivityKinds.SetByYou, $"{app.DisplayName} → {target.Name} (saved)", "Keyboard shortcut with Shift: it opens there from now on",
+                        undo, $"Keyboard shortcut: {app.DisplayName} opens on {target.Name} from now on (set by you).  [{app.Key} {target.DeviceName}]"));
+    }
+
+    /// <summary>"Keyboard shortcuts" on or off.</summary>
+    public void SetHotKeysEnabled(bool on)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (Settings.HotKeys.Enabled == on) return;
+        Settings.HotKeys.Enabled = on; Save();
+        Log.Write("Keyboard shortcuts: " + (on ? "on" : "off"));
+        UpdateHotKeys();
+        Changed?.Invoke();
+    }
+
+    /// <summary>Changes the keys of one shortcut (<paramref name="key"/> 0 = no shortcut). The default keys aren't saved.</summary>
+    public void SetHotKey(string action, int modifiers, int key)
+    {
+        if (!HotKeyActions.IsKnown(action) || !HotKeyActions.IsValid(modifiers, key)) return;
+        if (key == 0) modifiers = 0;
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var keys = Settings.HotKeys.Keys;
+        keys.RemoveAll(k => k.Action == action);
+        if ((modifiers, key) != HotKeyActions.DefaultKeys(action)) keys.Add(new HotKeyChoice { Action = action, Modifiers = modifiers, Key = key });
+        Save();
+        Log.Write($"Keyboard shortcut for {action}: {HotKeyActions.Text(modifiers, key)}");
+        UpdateHotKeys();
+        Changed?.Invoke();
+    }
+
+    /// <summary>Another shortcut that already has these keys (with or without Shift), or null.</summary>
+    public string? HotKeyUsedBy(string action, int modifiers, int key)
+    {
+        if (key == 0) return null;
+        int Plain(int m) => m & ~HotKeyActions.Shift;
+        return HotKeyActions.All.FirstOrDefault(a => a != action && HotKeyActions.KeysFor(Settings.HotKeys, a) is var k
+                                                    && k.Key == key && Plain(k.Modifiers) == Plain(modifiers));
+    }
+
+    /// <summary>One of the "Notifications" choices on or off (see <see cref="NoticeSettings"/>).</summary>
+    public void SetNotice(string which, bool on)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var n = Settings.Notices;
+        switch (which)
+        {
+            case NoticeLearned: n.Learned = on; break;
+            case NoticeOpenedElsewhere: n.OpenedElsewhere = on; break;
+            case NoticeMonitorBack: n.MonitorBack = on; break;
+            case NoticeAdminApp: n.AdminApp = on; break;
+            default: return;
+        }
+        Save();
+        Log.Write($"Notification \"{which}\": {(on ? "on" : "off")}");
+        Changed?.Invoke();
+    }
+
+    // ------------------------------------------------------------------ the app window in front (tray menu)
+
+    /// <summary>Notes the app window you switched to (for the tray menu's "Always open on…").</summary>
+    private void NoteForeground(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || hwnd == _lastAppWindow) return;
+        if (WindowInfo.Classify(hwnd, _ownPid) == WindowInfo.Kind.AppWindow) _lastAppWindow = hwnd;
+    }
+
+    /// <summary>The last app you used (not this one), its monitor, and its program file (null for Store apps).</summary>
+    public sealed record ForegroundApp(AppIdentity App, MonitorInfo? Monitor, string? ExePath);
+
+    /// <summary>The last app window you used, if it's still open (only in the program that places windows).</summary>
+    public ForegroundApp? LastForegroundApp()
+    {
+        var h = _lastAppWindow;
+        if (h == IntPtr.Zero || !Native.IsWindow(h) || !Native.IsWindowVisible(h)) return null;
+        var app = WindowInfo.Identify(h);
+        if (app == null) return null;
+        return new ForegroundApp(app, MonitorOfWindow(h), app.IsStoreApp ? null : WindowInfo.GetProcessPath(WindowInfo.GetPid(h)));
+    }
+
+    // ------------------------------------------------------------------ requests from the settings window
+
+    /// <summary>
+    /// Does what the settings window asks (see <see cref="HelperRequest"/>) and returns the answer, with Recent
+    /// activity and the keyboard shortcut problems.
+    /// </summary>
+    public HelperReply Answer(HelperRequest req)
+    {
+        var reply = new HelperReply { Id = req.Id };
+        try
+        {
+            switch (req.Command)
+            {
+                case HelperRequest.Status:
+                    reply.Count = TidyCount(req.IncludeMoved);
+                    break;
+                case HelperRequest.Tidy:
+                    reply.Count = TidyUp(req.IncludeMoved);
+                    break;
+                case HelperRequest.Gather:
+                case HelperRequest.MoveApp:
+                    var to = MonitorByDevice(req.ToDevice);
+                    var from = MonitorByDevice(req.FromDevice);
+                    if (to == null || (req.FromDevice != null && from == null)) { reply.Error = "That monitor isn't connected any more."; break; }
+                    reply.Count = req.Command == HelperRequest.Gather ? MoveWindowsTo(to, from)
+                        : req.AppKey == null ? 0 : MoveAppWindowsTo(req.AppKey, req.AppName, to);
+                    break;
+                case HelperRequest.Undo:
+                    var o = Undo(req.ActivityId);
+                    reply.Error = o.Error; reply.StopMovingKey = o.StopMovingKey; reply.StopMovingName = o.StopMovingName;
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"Unexpected error ({req.Command}): {ex.Message}");
+            reply.Error = "Something went wrong. The details are in the activity log.";
+        }
+        reply.Recent = _recent.ToList();
+        reply.HotKeyProblems = _hotKeyProblems.ToList();
+        return reply;
+    }
+
+    /// <summary>The helper's side of <see cref="HelperChannel"/>: reads the request, answers it (on the engine's thread).</summary>
+    public void AnswerRequest()
+    {
+        if (_disposed) return;
+        var req = HelperChannel.ReadRequest();
+        if (req == null) return;
+        ReloadIfChanged();
+        HelperChannel.WriteReply(Answer(req));
     }
 
     // ------------------------------------------------------------------ user actions
@@ -2059,12 +2808,21 @@ public sealed class Engine : IDisposable
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
-        var rule = Settings.Find(key);
-        if (rule == null)
-        {
-            rule = new AppRule { Key = key, DisplayName = displayName ?? key };
-            Settings.Apps.Add(rule);
-        }
+        var undo = PinCore(key, monitor, displayName, out var rule, out int n);
+        string moved = n == 0 ? "" : n == 1 ? " Its open window was moved there." : $" Its {n} open windows were moved there.";
+        string text = monitor == null ? $"Never move {rule.DisplayName}" : $"{rule.DisplayName} opens on {monitor.Name}";
+        Record(ActivityKinds.SetByYou, text, "Set by you" + (n == 0 ? "" : n == 1 ? "; its open window moved there" : $"; its {n} open windows moved there"),
+               undo, (monitor == null ? $"Set by you: never move {rule.DisplayName}." : $"Set by you: {rule.DisplayName} opens on {monitor.Name}.{moved}")
+                     + $"  [{rule.Key}{(monitor == null ? "" : " " + monitor.DeviceName)}]");
+    }
+
+    /// <summary>
+    /// Pins an app (see <see cref="Pin"/>) without writing to Recent activity. Returns how to undo it; <paramref name="moved"/>
+    /// is how many of its open windows were moved. Call it holding the settings lock.
+    /// </summary>
+    private UndoData PinCore(string key, MonitorInfo? monitor, string? displayName, out AppRule rule, out int moved)
+    {
+        rule = RuleToChange(key, displayName, out var undo);
         rule.LaunchTarget ??= FindLaunchTarget(key);
         rule.Pinned = true;
         rule.NeverMove = monitor == null;
@@ -2075,16 +2833,23 @@ public sealed class Engine : IDisposable
         rule.UpdatedUtc = DateTime.UtcNow;
         Save();
         ResetStreak();
+        if (monitor != null) undo.Windows.AddRange(MoveOpenWindows(rule.Key, rule, monitor, "set by you"));
+        moved = undo.Windows.Count;
+        return undo;
+    }
 
-        string moved = "";
-        if (monitor != null)
-        {
-            int n = MoveOpenWindows(rule, monitor);
-            if (n > 0) moved = n == 1 ? " Its open window was moved there." : $" Its {n} open windows were moved there.";
-        }
-        Note(monitor == null ? $"Set by you: never move {rule.DisplayName}." : $"Set by you: {rule.DisplayName} opens on {monitor.Name}.{moved}",
-             $"[{rule.Key}{(monitor == null ? "" : " " + monitor.DeviceName)}]");
-        Changed?.Invoke();
+    /// <summary>
+    /// The saved choice for an app you're about to change (added if it isn't saved yet), and how to undo the change.
+    /// Call it holding the settings lock.
+    /// </summary>
+    private AppRule RuleToChange(string key, string? displayName, out UndoData undo)
+    {
+        var rule = Settings.Find(key);
+        undo = new UndoData { RuleKey = key, RuleBefore = rule == null ? null : CopyRule(rule) };
+        if (rule != null) return rule;
+        rule = new AppRule { Key = key, DisplayName = displayName ?? key };
+        Settings.Apps.Add(rule);
+        return rule;
     }
 
     /// <summary>
@@ -2095,12 +2860,7 @@ public sealed class Engine : IDisposable
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
-        var rule = Settings.Find(key);
-        if (rule == null)
-        {
-            rule = new AppRule { Key = key, DisplayName = displayName ?? key };
-            Settings.Apps.Add(rule);
-        }
+        var rule = RuleToChange(key, displayName, out var undo);
         rule.LaunchTarget ??= FindLaunchTarget(key);
         rule.Pinned = true;
         rule.NeverMove = false;
@@ -2114,9 +2874,9 @@ public sealed class Engine : IDisposable
         rule.UpdatedUtc = DateTime.UtcNow;
         Save();
         ResetStreak();
-        Note($"Set by you: {rule.DisplayName} opens where you used it last ({string.Join(" or ", allowed.Select(m => m.Name))}).",
-             $"[{rule.Key} {string.Join(",", allowed.Select(m => m.DeviceName))}]");
-        Changed?.Invoke();
+        string where = string.Join(" or ", allowed.Select(m => m.Name));
+        Record(ActivityKinds.SetByYou, $"{rule.DisplayName} opens where you used it last", $"Set by you: {where}", undo,
+               $"Set by you: {rule.DisplayName} opens where you used it last ({where}).  [{rule.Key} {string.Join(",", allowed.Select(m => m.DeviceName))}]");
     }
 
     /// <summary>
@@ -2128,12 +2888,7 @@ public sealed class Engine : IDisposable
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
-        var rule = Settings.Find(key);
-        if (rule == null)
-        {
-            rule = new AppRule { Key = key, DisplayName = displayName ?? key };
-            Settings.Apps.Add(rule);
-        }
+        var rule = RuleToChange(key, displayName, out var undo);
         rule.LaunchTarget ??= FindLaunchTarget(key);
         rule.Pinned = true;
         rule.NeverMove = false;
@@ -2144,9 +2899,9 @@ public sealed class Engine : IDisposable
         rule.UpdatedUtc = DateTime.UtcNow;
         Save();
         ResetStreak();
-        Note($"Set by you: {rule.DisplayName} opens on the monitor you're using" +
-             (rule.AllowedMonitors.Count == 0 ? "." : $" ({string.Join(" or ", allowed.Select(m => m.Name))})."), $"[{rule.Key}]");
-        Changed?.Invoke();
+        string which = rule.AllowedMonitors.Count == 0 ? "any monitor" : string.Join(" or ", allowed.Select(m => m.Name));
+        Record(ActivityKinds.SetByYou, $"{rule.DisplayName} opens on the monitor you're using", $"Set by you: {which}", undo,
+               $"Set by you: {rule.DisplayName} opens on the monitor you're using ({which}).  [{rule.Key}]");
     }
 
     /// <summary>
@@ -2535,11 +3290,13 @@ public sealed class Engine : IDisposable
         return result.Values.ToList();
     }
 
-    /// <summary>Moves the app's open windows to the monitor (you asked for it, so this is the one time we move existing windows).</summary>
-    private int MoveOpenWindows(AppRule rule, MonitorInfo target)
+    /// <summary>
+    /// Moves the app's open windows to the monitor (you asked for it, so existing windows are moved). Returns where each
+    /// moved window was, for Undo. <paramref name="why"/> is for the log.
+    /// </summary>
+    private List<(IntPtr, WindowSnap)> MoveOpenWindows(string key, AppRule? rule, MonitorInfo target, string why)
     {
-        int moved = 0;
-        string key = rule.Key;
+        var moved = new List<(IntPtr, WindowSnap)>();
         var place = PlacementFor(rule, target);
         foreach (var h in WindowInfo.EnumTopLevel())
         {
@@ -2560,10 +3317,12 @@ public sealed class Engine : IDisposable
                 continue;
             }
             if (Native.IsHungAppWindow(h)) continue;
+            var before = Snap(h, ProcessStartOf(h));
             if (MovePlaced(h, target, place, false, () => true) == WindowMover.Result.Moved)
             {
-                moved++;
-                Log.Write($"Moved open window {app.Key} \"{title}\" from {current?.Name ?? "?"} to {target.Name} (set by you).");
+                if (before != null) moved.Add((h, before));
+                _displaced.Remove(h);
+                Log.Write($"Moved open window {app.Key} \"{title}\" from {current?.Name ?? "?"} to {target.Name} ({why}).");
             }
         }
         return moved;
@@ -2605,12 +3364,9 @@ public sealed class Engine : IDisposable
         Changed?.Invoke();
     }
 
-    private void Note(string message, string detail)
-    {
-        LastAction = $"{DateTime.Now:HH:mm}  {message}";
-        Log.Write(detail.Length > 0 ? $"{message}  {detail}" : message);
-        Changed?.Invoke();
-    }
+    /// <summary>Writes something worth knowing to the log and to Recent activity (nothing to undo).</summary>
+    private void Note(string message, string detail) =>
+        Record(ActivityKinds.Info, message.TrimEnd('.'), "", null, detail.Length > 0 ? $"{message}  {detail}" : message);
 
     private void Save() => SettingsStore.Save(Settings);
 
