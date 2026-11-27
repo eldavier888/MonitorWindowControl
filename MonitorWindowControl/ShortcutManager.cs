@@ -37,7 +37,10 @@ public static class ShortcutManager
                                         StringComparer.OrdinalIgnoreCase);
         string name = ShortcutName(rule);
         if (!taken.Contains(name)) return name;
-        string withKey = $"{name} ({Path.GetFileNameWithoutExtension(rule.Key)})";
+        string suffix = rule.Key.StartsWith(WindowInfo.WebAppKeyPrefix, StringComparison.Ordinal)
+            ? "web app" : Path.GetFileNameWithoutExtension(rule.Key);
+        foreach (char c in Path.GetInvalidFileNameChars()) suffix = suffix.Replace(c, ' ');
+        string withKey = $"{name} ({suffix.Trim()})";
         if (!taken.Contains(withKey)) return withKey;
         for (int n = 2; ; n++) if (!taken.Contains($"{name} {n}")) return $"{name} {n}";
     }

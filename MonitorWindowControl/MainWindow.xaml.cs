@@ -172,6 +172,7 @@ public partial class MainWindow : FluentWindow
     private static (string name, string detail) Names(string key, string displayName)
     {
         string name = string.IsNullOrWhiteSpace(displayName) ? key : displayName;
+        if (key.StartsWith(WindowInfo.WebAppKeyPrefix, StringComparison.Ordinal)) return (name, "web app"); // Netflix, Crave… inside Edge
         return (name, string.Equals(name, key, StringComparison.OrdinalIgnoreCase) ? "" : key);
     }
 

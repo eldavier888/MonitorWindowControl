@@ -69,6 +69,19 @@ public static class Native
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
+    // ---------- Window app id (web apps inside a browser) ----------
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROPERTYKEY { public Guid fmtid; public uint pid; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROPVARIANT { public ushort vt, r1, r2, r3; public IntPtr p, p2; }
+
+    [DllImport("shell32.dll")]
+    public static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid riid, out IntPtr propertyStore);
+
+    [DllImport("ole32.dll")]
+    public static extern int PropVariantClear(ref PROPVARIANT pvar);
+
     public const uint TH32CS_SNAPPROCESS = 0x00000002;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

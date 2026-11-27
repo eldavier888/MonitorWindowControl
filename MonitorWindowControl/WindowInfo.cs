@@ -84,6 +84,14 @@ internal static class WindowInfo
             return new AppIdentity(key, key, true);
         }
 
+        // Web apps (Netflix, Disney+, Prime Video, Crave… installed from the Store or a website) run inside the
+        // browser's process, so the exe can't tell them apart. Each of their windows carries its own app id, though.
+        if (WebAppId(h, exe) is string webId)
+        {
+            string name = CleanWebAppTitle(GetTitle(h));
+            return new AppIdentity(WebAppKeyPrefix + webId, name.Length > 0 ? name : webId, false);
+        }
+
         if (!DescriptionCache.TryGetValue(path, out var desc))
         {
             try { desc = FileVersionInfo.GetVersionInfo(path).FileDescription?.Trim() ?? ""; }
@@ -118,6 +126,9 @@ internal static class WindowInfo
             string? storeId = childPid == 0 ? null : GetAppUserModelId(childPid);
             return storeId == null ? null : "aumid:" + storeId;
         }
+
+        // Web apps inside a browser start through their own app id, like from the Start menu.
+        if (WebAppId(h, Path.GetFileName(path)) is string webId) return "aumid:" + webId;
 
         string? id = GetAppUserModelId(pid); // packaged desktop apps (new Notepad, Paint, Terminal…)
         if (id != null) return "aumid:" + id;
@@ -167,6 +178,63 @@ internal static class WindowInfo
             return Native.GetApplicationUserModelId(hp, ref len, sb) == 0 && sb.Length > 0 ? sb.ToString() : null;
         }
         finally { Native.CloseHandle(hp); }
+    }
+
+    // ------------------------------------------------------------------ web apps inside a browser
+
+    /// <summary>Key prefix for web apps: "app:" + their app id (e.g. "app:4DF9E0F8.Netflix_mcm4njqhnhss8!Netflix.App").</summary>
+    public const string WebAppKeyPrefix = "app:";
+
+    private static readonly HashSet<string> BrowserExes = new(StringComparer.OrdinalIgnoreCase)
+        { "msedge.exe", "chrome.exe", "brave.exe", "vivaldi.exe", "opera.exe" };
+
+    /// <summary>
+    /// The app id of a web-app window hosted by a browser, or null for ordinary browser windows.
+    /// Installed web apps report a Store-style id ("Package!App") or a browser app id ("Chrome._crx_…");
+    /// the browser itself reports just "MSEdge", "Chrome", etc.
+    /// </summary>
+    private static string? WebAppId(IntPtr h, string exe)
+    {
+        if (!BrowserExes.Contains(exe)) return null;
+        string? id = GetWindowAppId(h);
+        if (id == null) return null;
+        return id.Contains('!') || id.Contains("_crx_", StringComparison.OrdinalIgnoreCase) ? id : null;
+    }
+
+    /// <summary>"Prime Video: Watch movies…" → "Prime Video"; "Crave | Watch HBO…" → "Crave".</summary>
+    private static string CleanWebAppTitle(string title)
+    {
+        string t = title.Trim();
+        foreach (var sep in new[] { " | ", ": ", " - ", " – ", " — " })
+        {
+            int i = t.IndexOf(sep, StringComparison.Ordinal);
+            if (i > 0) t = t[..i];
+        }
+        return t.Trim();
+    }
+
+    /// <summary>The window's own app id (what the taskbar groups it by), via its shell property store.</summary>
+    private static unsafe string? GetWindowAppId(IntPtr h)
+    {
+        var iid = new Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"); // IPropertyStore
+        if (Native.SHGetPropertyStoreForWindow(h, ref iid, out IntPtr store) != 0 || store == IntPtr.Zero) return null;
+        try
+        {
+            // Call IPropertyStore::GetValue (vtable slot 5) directly; this also works in the native helper.
+            void** vtbl = *(void***)store;
+            var getValue = (delegate* unmanaged[Stdcall]<IntPtr, Native.PROPERTYKEY*, Native.PROPVARIANT*, int>)vtbl[5];
+            var key = new Native.PROPERTYKEY { fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), pid = 5 }; // AppUserModel.ID
+            Native.PROPVARIANT value = default;
+            if (getValue(store, &key, &value) != 0) return null;
+            string? id = value.vt == 31 /* VT_LPWSTR */ ? System.Runtime.InteropServices.Marshal.PtrToStringUni(value.p) : null;
+            Native.PropVariantClear(ref value);
+            return string.IsNullOrWhiteSpace(id) ? null : id;
+        }
+        finally
+        {
+            void** vtbl = *(void***)store;
+            ((delegate* unmanaged[Stdcall]<IntPtr, uint>)vtbl[2])(store); // Release
+        }
     }
 
     public static bool IsCloaked(IntPtr h)
