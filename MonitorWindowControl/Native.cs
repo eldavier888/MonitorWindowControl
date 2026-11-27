@@ -118,6 +118,39 @@ public static class Native
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
+    // ---------- Changing the main (primary) display ----------
+    public const int ENUM_CURRENT_SETTINGS = -1;
+    public const int DM_POSITION = 0x00000020;
+    public const uint CDS_UPDATEREGISTRY = 0x00000001;
+    public const uint CDS_SET_PRIMARY = 0x00000010;
+    public const uint CDS_NORESET = 0x10000000;
+    public const int DISP_CHANGE_SUCCESSFUL = 0;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct DEVMODE
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+        public int dmFields;
+        public int dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public short dmLogPixels;
+        public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int ChangeDisplaySettingsEx(string deviceName, ref DEVMODE devMode, IntPtr hwnd, uint flags, IntPtr lParam);
+
+    /// <summary>Applies the changes queued with CDS_NORESET.</summary>
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int ChangeDisplaySettingsEx(string? deviceName, IntPtr devMode, IntPtr hwnd, uint flags, IntPtr lParam);
+
     // ---------- Display config (friendly monitor names) ----------
     public const uint QDC_ONLY_ACTIVE_PATHS = 0x00000002;
     public const uint DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1;

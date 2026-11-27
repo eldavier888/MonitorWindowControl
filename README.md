@@ -56,8 +56,18 @@ time. Choose *More info → Run anyway*.
   background never teach it anything.
 - **Apps it hasn't learned yet**: open them on the main monitor, or leave them where Windows puts them.
 - **Your monitors**: shows each monitor by its model name; "(main)" is the one set as main display in Windows.
-- **Apps and where they open**: select an app, pick a monitor (or *Never move this app*) and press
-  **Change monitor**. That's "set by you": learning will never change it. **Forget** removes one app;
+  - **Name & number**: give a monitor your own name ("TV") and number ("3"). It then shows as "3 · TV"
+    everywhere in the app, and your numbers set the order. (Windows keeps its own display numbers; apps can't change those.)
+  - **Make main**: makes that monitor the main display in Windows itself, the same as Settings → Display →
+    "Make this my main display". The taskbar clock and Start menu move there, and apps it hasn't learned yet open there.
+- **Apps and where they open**: lists your saved apps **and every app that's open right now** ("open now").
+  Select one, choose where it opens and press **Save**:
+  - **a monitor**: it always opens there, and its open windows move there right away;
+  - **Where I used it last…**: tick the monitors it may use (for example the side monitor and the TV). It opens on
+    whichever of those you used it on most recently;
+  - **Never move this app**: leave it alone.
+
+  Your choice is "set by you": learning never overrides it. **Forget** removes one app;
   **Forget all…** removes everything (asks first).
 - **Open log**: every move, learn, pin and forget is written to a log with the time.
 
@@ -67,6 +77,7 @@ right after opening):
 | The app is... | Monitor Window Control... |
 |---|---|
 | learned or set by you | moves it to that monitor. If that monitor is off/disconnected, to the main monitor |
+| set to "Where I used it last" | moves it to the monitor (of the ones you ticked) where you last used it |
 | set to "Never move" | leaves it alone |
 | not known yet | moves it to the main monitor (or leaves it, per your setting) |
 

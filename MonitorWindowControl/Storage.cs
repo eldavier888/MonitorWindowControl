@@ -49,7 +49,28 @@ public sealed class AppRule
     public bool Pinned { get; set; }
     /// <summary>User chose "Never move this app".</summary>
     public bool NeverMove { get; set; }
+    /// <summary>
+    /// User chose "Where I used it last": MonitorDevice/MonitorName then hold the monitor it was last used on,
+    /// updated every time you use it on one of <see cref="AllowedMonitors"/> (empty = any monitor).
+    /// </summary>
+    public bool FollowLastUsed { get; set; }
+    public List<MonitorRef> AllowedMonitors { get; set; } = new();
     public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>A saved reference to a monitor: device name plus model name (in case Windows renumbers displays).</summary>
+public sealed class MonitorRef
+{
+    public string Device { get; set; } = "";
+    public string? Name { get; set; }
+}
+
+/// <summary>Your own name and/or number for a monitor.</summary>
+public sealed class MonitorNickname
+{
+    public MonitorRef Monitor { get; set; } = new();
+    public string Nickname { get; set; } = "";
+    public int? Number { get; set; }
 }
 
 public sealed class AppSettings
@@ -60,6 +81,8 @@ public sealed class AppSettings
     /// <summary>true = apps it hasn't learned yet open on the main monitor; false = leave them.</summary>
     public bool MoveUnknownToMain { get; set; } = true;
     public List<AppRule> Apps { get; set; } = new();
+    /// <summary>Your own names for monitors ("1 · Main", "TV"…).</summary>
+    public List<MonitorNickname> MonitorNicknames { get; set; } = new();
 
     public AppRule? Find(string key) =>
         Apps.FirstOrDefault(a => string.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase));
@@ -78,6 +101,8 @@ public static class SettingsStore
             var s = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(Paths.SettingsFile), Options) ?? new AppSettings();
             s.Apps ??= new List<AppRule>();
             s.Apps.RemoveAll(a => string.IsNullOrWhiteSpace(a.Key));
+            foreach (var a in s.Apps) a.AllowedMonitors ??= new();
+            s.MonitorNicknames ??= new();
             return s;
         }
         catch (Exception ex)

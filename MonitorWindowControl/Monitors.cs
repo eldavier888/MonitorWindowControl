@@ -14,10 +14,21 @@ public sealed class MonitorInfo
     public Native.RECT Bounds { get; init; }
     public Native.RECT Work { get; init; }
 
-    /// <summary>Name shown to the user, e.g. "Odyssey G8 (main)".</summary>
-    public string Label => FriendlyName + (IsPrimary ? " (main)" : "");
+    /// <summary>Your own name for it (set with Rename), or null.</summary>
+    public string? Nickname { get; set; }
 
-    public string Details => $"{Bounds.Width} × {Bounds.Height}   ·   {DeviceName.Replace(@"\\.\", "")}";
+    /// <summary>Your own number for it (set with "Name &amp; number"), or null.</summary>
+    public int? Number { get; set; }
+
+    /// <summary>The name to show: "2 · TV" style when numbered, your name for it, else the model name.</summary>
+    public string Name => (Number is int n ? $"{n} · " : "") + (string.IsNullOrWhiteSpace(Nickname) ? FriendlyName : Nickname!);
+
+    /// <summary>Name shown to the user, e.g. "1 · Odyssey G8 (main)".</summary>
+    public string Label => Name + (IsPrimary ? " (main)" : "");
+
+    public string Details =>
+        (string.IsNullOrWhiteSpace(Nickname) ? "" : FriendlyName + "   ·   ") +
+        $"{Bounds.Width} × {Bounds.Height}   ·   Windows display {DeviceName.Replace(@"\\.\DISPLAY", "")}";
 
     public override string ToString() => Label;
 }
