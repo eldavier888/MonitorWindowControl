@@ -8,8 +8,7 @@ It learns homes by itself: when you use an app on a monitor for a few seconds, t
   <img src="docs/screenshot.png" alt="Monitor Window Control window: toggles, the three connected monitors by model name, and a list of apps with the monitor each one opens on" width="560">
 </p>
 
-**[⬇ Download MonitorWindowControl.exe](../../releases/latest/download/MonitorWindowControl.exe)** (6 MB, Windows 10/11, no install).
-Or get the [144 MB standalone version](../../releases/latest/download/MonitorWindowControl-standalone.exe) if you don't want to install .NET (see [Run it](#run-it)).
+**[⬇ Download MonitorWindowControl.exe](../../releases/latest/download/MonitorWindowControl.exe)** (6 MB, Windows 10/11, no install)
 
 ## Why
 
@@ -32,15 +31,10 @@ which monitor an app's new windows should open on.
 
 ## Run it
 
-1. Download one of the two files from the [latest release](../../releases/latest) and put it anywhere you like
-   (for example `C:\Tools\MonitorWindowControl\`). Neither one needs installing or admin rights.
-
-   | File | Size | Needs |
-   |---|---|---|
-   | `MonitorWindowControl.exe` (recommended) | 6 MB | The free [.NET Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) 8 or newer. Many PCs already have it. If yours doesn't, Windows offers to download it the first time you start the app. |
-   | `MonitorWindowControl-standalone.exe` | 144 MB | Nothing. It carries its own copy of .NET, which is why it's big. |
-
-   Both do exactly the same thing and use the same settings.
+1. Download `MonitorWindowControl.exe` from the [latest release](../../releases/latest) and put it anywhere you like
+   (for example `C:\Tools\MonitorWindowControl\`). It's a single file that needs no installing and no admin rights.
+   It uses the free [.NET Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) 8 or newer, which
+   many PCs already have. If yours doesn't, Windows offers to download it the first time you start the app.
 2. Double-click it. The first time, its window opens. After that it starts quietly in the tray
    (look for the blue monitor-with-a-house icon; it may be under the **^** arrow next to the clock).
 3. To have it start when you sign in, turn on **Start with Windows** in its window.
@@ -98,13 +92,10 @@ You only need this if you change the code.
 2. Open PowerShell in the `MonitorWindowControl` folder (the one with `MonitorWindowControl.csproj`) and run:
 
 ```powershell
-dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o ..\publish
+dotnet publish -c Release -o ..\publish
 ```
 
 The result is `publish\MonitorWindowControl.exe` (about 6 MB, needs the .NET Desktop Runtime 8 or newer).
-For the standalone version that carries its own .NET (about 144 MB), use `--self-contained true` instead.
-It isn't compressed on purpose: a compressed exe is about half the size, but it unpacks itself into memory
-and uses ~370 MB of RAM instead of ~70 MB.
 
 Project layout:
 

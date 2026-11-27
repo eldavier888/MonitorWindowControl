@@ -4,6 +4,6 @@ Stop-Process -Name MonitorWindowControl -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 if ($Fresh) { Remove-Item "$env:APPDATA\MonitorWindowControl" -Recurse -Force -ErrorAction SilentlyContinue }
 Push-Location (Join-Path $PSScriptRoot '..')
-dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o "..\publish" 2>&1 | Select-String "error|warning CS|->"
+dotnet publish -c Release -o "..\publish" 2>&1 | Select-String "error|warning CS|->"
 Pop-Location
 Start-Process (Join-Path $PSScriptRoot '..\..\publish\MonitorWindowControl.exe')

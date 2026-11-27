@@ -13,16 +13,16 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <Version>1.2.0</Version>
-    <!-- Small build uses the installed .NET Desktop Runtime: 8, or any newer one (9, 10, ...). -->
+    <!-- Uses the installed .NET Desktop Runtime (8, or any newer one: 9, 10, ...) instead of bundling
+         its own copy, which keeps the exe at ~6 MB instead of ~144 MB. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
     <RollForward>Major</RollForward>
     <Product>Monitor Window Control</Product>
     <AssemblyTitle>Monitor Window Control</AssemblyTitle>
     <Description>Opens each app's windows on the monitor you actually use it on.</Description>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <!-- Single-file publish: pack native WPF DLLs into the exe too. Not compressed on purpose:
-         compression makes the exe smaller but unpacks everything into RAM (~370 MB vs much less). -->
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
     <DebugType>embedded</DebugType>
     <!-- WinForms is only used for the tray icon; DPI is set by app.manifest on purpose. -->
     <NoWarn>$(NoWarn);WFAC010</NoWarn>
