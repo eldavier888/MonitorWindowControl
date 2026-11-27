@@ -125,6 +125,18 @@ public partial class MainWindow : FluentWindow
             combo.PreviewMouseWheel += Combo_PreviewMouseWheel;
         PreviewKeyDown += (_, _) => _lastKeyTick = Environment.TickCount;
         Loaded += (_, _) => PageScroller.ScrollToTop();
+        Deactivated += (_, _) => IdentifyOverlay.HideOutline();
+        MonitorLayout.TileClicked += (m, _) => ShowMonitorCard(m);
+        TargetLayout.TileClicked += (m, _) =>
+        {
+            if (TargetCombo.Items.OfType<MonitorInfo>().FirstOrDefault(x => x.DeviceName == m.DeviceName) is MonitorInfo item) TargetCombo.SelectedItem = item;
+        };
+        WelcomeLayout.TileClicked += (m, _) => _welcomeMonitors.FirstOrDefault(r => r.Device == m.DeviceName)?.NumberBox.Focus();
+        AllowedLayout.TileClicked += (m, on) =>
+        {
+            var item = _allowedItems.FirstOrDefault(a => a.Monitor.DeviceName == m.DeviceName);
+            if (item != null) { item.Checked = on; BuildAllowedRows(); }
+        };
         VersionText.Text = $"Version {AppVersion} · free and open source (MIT licence)";
         SettingsFolderText.Text = Paths.Dir;
         NavList.SelectedIndex = 0;
@@ -197,6 +209,7 @@ public partial class MainWindow : FluentWindow
         PageApps.Visibility = page == "Apps" ? Visibility.Visible : Visibility.Collapsed;
         PageAbout.Visibility = page == "About" ? Visibility.Visible : Visibility.Collapsed;
         PageScroller.ScrollToTop();
+        IdentifyOverlay.HideOutline();
         if (page == "General" && _engine != null) _ = RefreshStatusAsync();
     }
 
@@ -244,6 +257,7 @@ public partial class MainWindow : FluentWindow
     // Closing the window really closes it (frees its memory); the app keeps running in the tray.
     protected override void OnClosed(EventArgs e)
     {
+        IdentifyOverlay.CloseAll();
         Detach();
         base.OnClosed(e);
     }
@@ -321,6 +335,7 @@ public partial class MainWindow : FluentWindow
             string sig = string.Join("|", _engine.Monitors.Select(m => $"{m.DeviceName}={m.Label}/{m.Details}/{m.ShowTemporaryOption}{m.IsTemporary}" +
                                                                        $"/{m.ShowMonitorChoices}{m.SwitchedOffNote}{m.OpenHereIndex}"));
             if (sig != _monitorSig) { _monitorSig = sig; MonitorsList.ItemsSource = _engine.Monitors.ToList(); }
+            MonitorLayout.SetMonitors(_engine.Monitors);
             UpdateKeepMainCard(launchOnly);
         }
         finally { _updating = false; }
@@ -444,6 +459,8 @@ public partial class MainWindow : FluentWindow
 
         var items = new List<object>(_engine.Monitors) { LastUsedLabel, MouseLabel, NeverMoveLabel };
         TargetCombo.ItemsSource = items;
+        TargetLayout.SetMonitors(_engine.Monitors);
+        AllowedLayout.SetMonitors(_engine.Monitors);
 
         // "Where I used it last" and "The monitor I'm using": ticked = monitors it may open on, in its order (then the
         // others). All are ticked when it isn't set yet, except monitors kept for chosen apps.
@@ -496,6 +513,12 @@ public partial class MainWindow : FluentWindow
         AppFallbackPanel.Visibility = moves;
         PlacePanel.Visibility = moves;
         AdvancedExpander.Visibility = moves;
+        // The monitor picture: one tile chosen for a monitor, ticked tiles for "Where I used it last" and "The monitor I'm using".
+        bool list = choice is LastUsedLabel or MouseLabel;
+        bool several = _engine.Monitors.Count > 1;
+        TargetLayout.Visibility = several && !list ? Visibility.Visible : Visibility.Collapsed;
+        AllowedLayout.Visibility = several && list ? Visibility.Visible : Visibility.Collapsed;
+        TargetLayout.Select(new[] { TargetCombo.SelectedItem as MonitorInfo });
     }
 
     /// <summary>The line under "Place it" for "Where I last had it": on how many monitors it's known, with Reset.</summary>
@@ -561,7 +584,11 @@ public partial class MainWindow : FluentWindow
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var box = new CheckBox { Content = item.Monitor.Label, IsChecked = item.Checked, VerticalAlignment = VerticalAlignment.Center };
             System.Windows.Automation.AutomationProperties.SetName(box, item.Monitor.Label);
-            box.Click += (_, _) => item.Checked = box.IsChecked == true;
+            box.Click += (_, _) =>
+            {
+                item.Checked = box.IsChecked == true;
+                AllowedLayout.Select(_allowedItems.Where(a => a.Checked).Select(a => (MonitorInfo?)a.Monitor));
+            };
             row.Children.Add(box);
             var up = MoveButton(SymbolRegular.ArrowUp24, $"Move {item.Monitor.Name} up", index > 0, () => MoveAllowed(index, -1));
             var down = MoveButton(SymbolRegular.ArrowDown24, $"Move {item.Monitor.Name} down", index < _allowedItems.Count - 1, () => MoveAllowed(index, +1));
@@ -572,6 +599,7 @@ public partial class MainWindow : FluentWindow
             if (i == focusIndex) focus = focusUp ? (up.IsEnabled ? up : down) : (down.IsEnabled ? down : up);
         }
         AllowedList.ItemsSource = rows;
+        AllowedLayout.Select(_allowedItems.Where(a => a.Checked).Select(a => (MonitorInfo?)a.Monitor));
         if (focus != null)
             Dispatcher.BeginInvoke(() => focus.Focus(), System.Windows.Threading.DispatcherPriority.Input);
     }
@@ -932,6 +960,38 @@ public partial class MainWindow : FluentWindow
         int choice = combo.SelectedIndex;
         if (choice < 0 || choice == m.OpenHereIndex) return;
         _engine.SetMonitorOnlyChosenApps(m, choice == 1);
+    }
+
+    /// <summary>Identify (Monitors page and welcome): each monitor shows its number and name on it for 3 seconds.</summary>
+    private void Identify_Click(object sender, RoutedEventArgs e) => IdentifyOverlay.ShowLabels(_engine.Monitors);
+
+    /// <summary>A tile in the monitor picture was selected: go to that monitor's card.</summary>
+    private void ShowMonitorCard(MonitorInfo m)
+    {
+        if (MonitorsList.ItemContainerGenerator.ContainerFromItem(
+                (MonitorsList.ItemsSource as IEnumerable<MonitorInfo>)?.FirstOrDefault(x => x.DeviceName == m.DeviceName)) is not FrameworkElement card) return;
+        _lastKeyTick = Environment.TickCount; // (let the page scroll to it)
+        card.BringIntoView();
+    }
+
+    /// <summary>Pointing at a monitor's card outlines that monitor, so you can see which one it is.</summary>
+    private void MonitorCard_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is MonitorInfo m && _engine.Monitors.Count > 1) IdentifyOverlay.ShowOutline(m);
+    }
+
+    private void MonitorCard_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e) => IdentifyOverlay.HideOutline();
+
+    /// <summary>Moving the keyboard focus onto a monitor's card outlines that monitor too (and marks it in the picture).</summary>
+    private void MonitorCard_FocusWithinChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not MonitorInfo m) return;
+        if (e.NewValue is true)
+        {
+            MonitorLayout.Select(new MonitorInfo?[] { m });
+            if (_engine.Monitors.Count > 1) IdentifyOverlay.ShowOutline(m);
+        }
+        else IdentifyOverlay.HideOutline();
     }
 
     private async void MakeMain_Click(object sender, RoutedEventArgs e)

@@ -40,6 +40,11 @@ which monitor an app's new windows should open on.
 2. Double-click it and its window opens. When you close the window it keeps working in the tray
    (look for the blue monitor-with-a-house icon; it may be under the **^** arrow next to the clock).
    You don't need to set anything: just use your apps, and each one is learned after a few seconds on a monitor.
+   The very first time, a short welcome inside the window walks you through three steps, each of which you can skip:
+   your monitors (give them numbers and names, with **Identify** to see which is which), apps that belong on a
+   specific monitor (each open app has a monitor list, and a TV can be kept for **Only apps I choose**), and how it
+   runs (the three choices below, with how much memory each uses, and **Start with Windows**). Then it shows the
+   General page. An imported `WindowHome.ini` (see below) is already in place when the welcome starts.
 3. To have it start when you sign in, turn on **Start with Windows** in its window. Apps that start with Windows too
    (a chat or music app, for example) often open before Monitor Window Control does: with **Also place apps that opened
    while signing in** (on by default), their windows are moved to their monitors right after you sign in. Windows you've
@@ -70,8 +75,8 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
 ## Using it
 
 - **Tray icon** (tray mode): double-click to open the window. Right-click for *Open*, *Move new windows*
-  (pause/resume), *Move open windows to their monitors*, *Bring all windows to*, *Monitors* (treat a monitor as switched
-  off, see below), *Exit*. Closing the window just puts it back in the tray (**Exit** in the window closes it completely).
+  (pause/resume), *Move open windows to their monitors*, *Bring all windows to*, *Monitors* (*Identify*, and treat a
+  monitor as switched off, see below), *Exit*. Closing the window just puts it back in the tray (**Exit** in the window closes it completely).
   In the other modes there's no tray icon: start `MonitorWindowControl.exe` again to change settings, and closing
   its window closes it completely.
 - **Always open on…** (tray mode): the top of the tray menu shows the last app you used, for example
@@ -109,6 +114,12 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
   After you sign in again and the monitors are back (it waits up to a minute for all of them), windows that moved go
   back where they were. Windows you move after waking up are left alone. Windows of a monitor that isn't back yet go
   back when it is.
+- **Monitor layout and Identify**: the top of the Monitors page shows how your monitors are arranged, like
+  Settings → Display, with your own numbers and names and "(main)". Select a monitor in the picture to go to its
+  settings. **Identify** (also under *Monitors* in the tray menu) shows each monitor's number and name in large letters
+  on that monitor for 3 seconds. Pointing at a monitor's settings (or moving to them with the keyboard) outlines that
+  monitor, so you can see which one it is. On the Apps page, the same picture sits above **Open it on**: select a
+  monitor in it, or, for *Where I used it last* and *The monitor I'm using*, select the monitors it may open on.
 - **Your monitors**: shows each monitor by its model name, its size and how it's connected (HDMI, DisplayPort,
   USB-C, wireless…); "(main)" is the one set as main display in Windows. Monitors are recognised by the monitor
   itself (its serial number and the port it's plugged into), not by Windows' display number, so homes, names and

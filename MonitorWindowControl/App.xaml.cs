@@ -27,6 +27,7 @@ public partial class App : Application
     private TrayIcon? _tray;
     private MainWindow? _window;
     private DispatcherTimer? _activateRetry;
+    private bool _showWelcome; // first start: the window opens on the welcome
 
     public static bool IsExiting { get; private set; }
 
@@ -66,6 +67,7 @@ public partial class App : Application
         _engine = new Engine(_host);
         _host.Attach(_engine);
         bool firstRun = _engine.Start(importLegacy: true, who: "Monitor Window Control");
+        _showWelcome = firstRun;
         StartupManager.RemoveOldNameEntry();
         // Versions before 1.4 kept "Start with Windows" only in the registry.
         if (_engine.Settings.StartWithWindows == null) _engine.SetStartWithWindows(StartupManager.IsEnabled());
@@ -96,7 +98,7 @@ public partial class App : Application
         {
             HelperManager.Stop(); // it would otherwise also place windows
             TryActivate();
-            _tray ??= new TrayIcon(_engine, ShowMainWindow, ExitApp, ShowApp, OnUndoneFromTray);
+            _tray ??= new TrayIcon(_engine, ShowMainWindow, ExitApp, ShowApp, OnUndoneFromTray, IdentifyMonitors);
         }
         else
         {
@@ -240,12 +242,19 @@ public partial class App : Application
                 WindowMover.MoveTo(hwnd, main);
             }
             w.Show();
+            if (_showWelcome) { _showWelcome = false; w.ShowWelcome(); }
             // Windows may apply the launcher's "start maximized/minimized" request to a shown window; undo it.
             if (w.WindowState != WindowState.Normal) w.WindowState = WindowState.Normal;
         }
         else if (_window.WindowState == WindowState.Minimized) _window.WindowState = WindowState.Normal;
         _window.Activate();
         _window.Topmost = true; _window.Topmost = false; // bring to front reliably
+    }
+
+    /// <summary>Tray menu → Identify monitors: each monitor shows its number and name on it for 3 seconds.</summary>
+    private void IdentifyMonitors()
+    {
+        if (_engine != null) IdentifyOverlay.ShowLabels(_engine.Monitors);
     }
 
     /// <summary>Tray menu → More choices…: the window's Apps page with that app selected.</summary>

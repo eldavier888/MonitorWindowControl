@@ -200,6 +200,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Undo data must stay in memory (no window titles persisted beyond the existing log). Real Windows toasts for an unpackaged app need an AUMID on the Start menu shortcut, so start with tray balloons.
 
 ### 11. Identify monitors and show a clickable monitor layout
+**Status:** built in v1.6.0
 
 *Monitors · effort M*
 
@@ -329,6 +330,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Some permanent USB-C monitors are DisplayLink (INDIRECT_WIRED), hence the override, which could default to 'Temporary' only for Miracast and virtual displays. Monitors.cs already reads outputTechnology.
 
 ### 21. First-run welcome: your monitors, your apps, how it runs
+**Status:** partly built: step 2 lists the apps that are open, not apps that are installed but closed (finding those would mean reading the Start menu and Store app lists); the rest is built in v1.6.0
 
 *Onboarding · effort M*
 

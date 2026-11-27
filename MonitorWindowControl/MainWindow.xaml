@@ -40,6 +40,46 @@
         <Style TargetType="ui:CardControl" BasedOn="{StaticResource {x:Type ui:CardControl}}">
             <Setter Property="Margin" Value="0,0,0,4" />
         </Style>
+        <!-- A monitor in the layout picture (a radio button or check box drawn as a tile, like Settings > Display) -->
+        <Style x:Key="MonitorTile" TargetType="ToggleButton">
+            <Setter Property="Background" Value="{DynamicResource ControlFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource ControlStrokeColorDefaultBrush}" />
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Focusable" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="TileBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="TileBorder" Property="Background" Value="{DynamicResource ControlFillColorSecondaryBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="TileBorder" Property="BorderBrush" Value="{DynamicResource AccentFillColorDefaultBrush}" />
+                                <Setter TargetName="TileBorder" Property="BorderThickness" Value="3" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="TileBorder" Property="BorderBrush" Value="{DynamicResource TextFillColorPrimaryBrush}" />
+                                <Setter TargetName="TileBorder" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                            <MultiTrigger>
+                                <MultiTrigger.Conditions>
+                                    <Condition Property="IsKeyboardFocused" Value="True" />
+                                    <Condition Property="IsChecked" Value="True" />
+                                </MultiTrigger.Conditions>
+                                <Setter TargetName="TileBorder" Property="BorderBrush" Value="{DynamicResource AccentFillColorDefaultBrush}" />
+                                <Setter TargetName="TileBorder" Property="BorderThickness" Value="4" />
+                            </MultiTrigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </ui:FluentWindow.Resources>
 
     <Grid>
@@ -50,7 +90,7 @@
 
         <ui:TitleBar Grid.Row="0" Title="Monitor Window Control" />
 
-        <Grid Grid.Row="1">
+        <Grid x:Name="MainArea" Grid.Row="1">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="NavColumn" Width="280" />
                 <ColumnDefinition Width="*" />
@@ -335,11 +375,26 @@
                         <TextBlock Style="{StaticResource PageTitle}" Text="Monitors" />
                         <TextBlock Style="{StaticResource Secondary}" FontSize="13" Margin="2,0,0,16"
                                    Text="Give your monitors your own names and numbers, and choose the main monitor (where the taskbar clock and Start menu are, and where apps it hasn't learned yet open)." />
+                        <!-- How the monitors are arranged; select one to go to its settings -->
+                        <ui:Card Padding="16,14" Margin="0,0,0,4">
+                            <StackPanel>
+                                <local:MonitorLayoutView x:Name="MonitorLayout" MaxDiagramHeight="200" Margin="0,0,0,12"
+                                                         AutomationProperties.Name="Monitor layout: select a monitor to go to its settings" />
+                                <DockPanel>
+                                    <ui:Button x:Name="IdentifyButton" DockPanel.Dock="Right" Content="Identify" Icon="{ui:SymbolIcon NumberSymbolSquare24}"
+                                               Click="Identify_Click" AutomationProperties.Name="Identify: show each monitor's number and name on it for 3 seconds"
+                                               ToolTip="Show each monitor's number and name on it for 3 seconds" />
+                                    <TextBlock Style="{StaticResource Secondary}" VerticalAlignment="Center" Margin="0,0,12,0"
+                                               Text="Select a monitor to go to its settings. These are your own names and numbers, not the ones Windows uses." />
+                                </DockPanel>
+                            </StackPanel>
+                        </ui:Card>
                         <ItemsControl x:Name="MonitorsList">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
                                     <StackPanel>
-                                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Desktop24}">
+                                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Desktop24}" MouseEnter="MonitorCard_MouseEnter" MouseLeave="MonitorCard_MouseLeave"
+                                                        IsKeyboardFocusWithinChanged="MonitorCard_FocusWithinChanged">
                                             <ui:CardControl.Header>
                                                 <StackPanel Margin="0,0,16,0">
                                                     <TextBlock Style="{StaticResource CardTitle}" Text="{Binding Label}" />
@@ -506,6 +561,11 @@
                                         <TextBlock x:Name="SelectedAppName" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" Text="No app selected" />
                                         <TextBlock x:Name="SelectedAppDetail" Style="{StaticResource Secondary}" Margin="0,2,0,12" />
                                         <TextBlock Text="Open it on" Margin="0,0,0,6" />
+                                        <!-- The same choice as a picture: select a monitor (or, for "Where I used it last", tick several) -->
+                                        <local:MonitorLayoutView x:Name="TargetLayout" MaxDiagramHeight="90" Margin="0,0,0,8"
+                                                                 AutomationProperties.Name="Open it on: monitor layout" />
+                                        <local:MonitorLayoutView x:Name="AllowedLayout" MultiSelect="True" MaxDiagramHeight="90" Margin="0,0,0,8" Visibility="Collapsed"
+                                                                 AutomationProperties.Name="Monitors it may open on: monitor layout" />
                                         <ComboBox x:Name="TargetCombo" HorizontalAlignment="Stretch" AutomationProperties.Name="Open it on" SelectionChanged="TargetCombo_SelectionChanged" />
                                         <!-- An app that's open now: move its windows there once, without saving -->
                                         <ui:Button x:Name="MoveNowButton" Content="Move its windows there now" Margin="0,8,0,0" Visibility="Collapsed"
@@ -641,6 +701,104 @@
                 </Grid>
               </Grid>
             </ScrollViewer>
+        </Grid>
+
+        <!-- ============================================================ First-run welcome (3 steps, each can be skipped) -->
+        <Grid x:Name="WelcomeOverlay" Grid.Row="1" Visibility="Collapsed" Background="{DynamicResource ApplicationBackgroundBrush}"
+              AutomationProperties.Name="Welcome">
+            <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+            <ScrollViewer x:Name="WelcomeScroller" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel MaxWidth="820" Margin="32,4,32,16">
+                    <TextBlock x:Name="WelcomeStepText" Style="{StaticResource Secondary}" FontSize="13" Margin="2,0,0,4" />
+                    <TextBlock x:Name="WelcomeTitle" Style="{StaticResource PageTitle}" TextWrapping="Wrap" />
+                    <TextBlock x:Name="WelcomeIntro" Style="{StaticResource Secondary}" FontSize="13" Margin="2,0,0,16" />
+
+                    <!-- Step 1: your monitors -->
+                    <StackPanel x:Name="WelcomeStep1">
+                        <ui:Card Padding="16,14" Margin="0,0,0,4">
+                            <StackPanel>
+                                <local:MonitorLayoutView x:Name="WelcomeLayout" MaxDiagramHeight="170" Margin="0,0,0,12"
+                                                         AutomationProperties.Name="Monitor layout" />
+                                <DockPanel>
+                                    <ui:Button DockPanel.Dock="Right" Content="Identify" Icon="{ui:SymbolIcon NumberSymbolSquare24}" Click="Identify_Click"
+                                               AutomationProperties.Name="Identify: show each monitor's number and name on it for 3 seconds" />
+                                    <TextBlock Style="{StaticResource Secondary}" VerticalAlignment="Center" Margin="0,0,12,0"
+                                               Text="Not sure which is which? Select Identify to show each monitor's number and name on it." />
+                                </DockPanel>
+                            </StackPanel>
+                        </ui:Card>
+                        <StackPanel x:Name="WelcomeMonitorRows" KeyboardNavigation.TabNavigation="Continue" />
+                    </StackPanel>
+
+                    <!-- Step 2: apps that belong on a specific monitor -->
+                    <StackPanel x:Name="WelcomeStep2" Visibility="Collapsed">
+                        <StackPanel x:Name="WelcomeAppRows" KeyboardNavigation.TabNavigation="Continue" />
+                        <TextBlock x:Name="WelcomeNoApps" Style="{StaticResource Secondary}" FontSize="13" Margin="2,0,0,8" Visibility="Collapsed"
+                                   Text="No apps are open right now. That's fine: just use your apps, and each one is learned after a few seconds on a monitor." />
+                        <StackPanel x:Name="WelcomeOnlyChosenSection">
+                            <TextBlock Style="{StaticResource SectionHeader}" Text="Monitors for a few apps only" />
+                            <StackPanel x:Name="WelcomeOnlyChosenRows" KeyboardNavigation.TabNavigation="Continue" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <!-- Step 3: how it runs -->
+                    <StackPanel x:Name="WelcomeStep3" Visibility="Collapsed">
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Apps24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="In the tray (recommended)" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Places every new window and learns where you use apps. Its icon in the tray gives you quick choices. Uses about 30 MB of memory." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <RadioButton x:Name="WelcomeModeTray" GroupName="WelcomeMode" Tag="Tray" MinWidth="0"
+                                         AutomationProperties.Name="In the tray (recommended). Uses about 30 MB of memory" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Sparkle24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Small background helper" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Does the same, with no tray icon. Open this window from the Start menu to change settings. Uses about 5 MB of memory." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <RadioButton x:Name="WelcomeModeHelper" GroupName="WelcomeMode" Tag="Helper" MinWidth="0"
+                                         AutomationProperties.Name="Small background helper. Uses about 5 MB of memory" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Rocket24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Nothing in the background" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Uses no memory while you work. Only apps you open from launch shortcuts (made on the Apps page) are placed, and nothing is learned." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <RadioButton x:Name="WelcomeModeLaunchOnly" GroupName="WelcomeMode" Tag="LaunchOnly" MinWidth="0"
+                                         AutomationProperties.Name="Nothing in the background. Uses no memory while you work" />
+                        </ui:CardControl>
+                        <TextBlock Style="{StaticResource SectionHeader}" Text="Startup" />
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=PersonClock24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Start with Windows" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Starts quietly when you sign in, so windows are placed from the start. Not needed with nothing in the background." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:ToggleSwitch x:Name="WelcomeStartupToggle" AutomationProperties.Name="Start with Windows" />
+                        </ui:CardControl>
+                        <TextBlock Style="{StaticResource Secondary}" Margin="2,12,0,0"
+                                   Text="You can change all of this later on the General, Monitors and Apps pages." />
+                    </StackPanel>
+                </StackPanel>
+            </ScrollViewer>
+            <Border Grid.Row="1" BorderThickness="0,1,0,0" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" Padding="32,12,32,16">
+                <DockPanel MaxWidth="820">
+                    <ui:Button x:Name="WelcomeSkipButton" DockPanel.Dock="Left" Content="Skip" Appearance="Transparent" Click="WelcomeSkip_Click"
+                               AutomationProperties.Name="Skip this step" />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <ui:Button x:Name="WelcomeBackButton" Content="Back" MinWidth="96" Click="WelcomeBack_Click" AutomationProperties.Name="Back" />
+                        <ui:Button x:Name="WelcomeNextButton" Content="Next" MinWidth="96" Margin="8,0,0,0" Appearance="Primary" Click="WelcomeNext_Click"
+                                   AutomationProperties.Name="Next" />
+                    </StackPanel>
+                </DockPanel>
+            </Border>
         </Grid>
     </Grid>
 </ui:FluentWindow>

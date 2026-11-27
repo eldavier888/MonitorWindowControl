@@ -8,8 +8,8 @@ namespace MonitorWindowControl;
 
 /// <summary>
 /// Notification-area icon: double-click opens. The menu has, for the last app you used, "Always open on…"; then Open,
-/// Move new windows (pause), Move open windows to their monitors, Bring all windows to…, Monitors ("treat as switched
-/// off", two clicks from the couch), Exit. Notifications from the engine show as balloons; selecting one undoes it.
+/// Move new windows (pause), Move open windows to their monitors, Bring all windows to…, Monitors (Identify, and "treat
+/// as switched off", two clicks from the couch), Exit. Notifications from the engine show as balloons; selecting one undoes it.
 /// </summary>
 internal sealed class TrayIcon : IDisposable
 {
@@ -27,16 +27,19 @@ internal sealed class TrayIcon : IDisposable
     private readonly Font _boldFont;
     private readonly Action<string, string> _openApp;
     private readonly Action<Engine.UndoOutcome> _undone;
+    private readonly Action _identify;
     private Image? _appImage;
     private int? _balloonActivity; // the Recent activity event the balloon on screen is about (selecting it undoes it)
 
     /// <param name="openApp">Opens the window on the Apps page with this app (key, name) selected.</param>
     /// <param name="undone">Called after a balloon was selected to undo something.</param>
-    public TrayIcon(Engine engine, Action open, Action exit, Action<string, string> openApp, Action<Engine.UndoOutcome> undone)
+    /// <param name="identify">Shows each monitor's number and name on it for a few seconds.</param>
+    public TrayIcon(Engine engine, Action open, Action exit, Action<string, string> openApp, Action<Engine.UndoOutcome> undone, Action identify)
     {
         _engine = engine;
         _openApp = openApp;
         _undone = undone;
+        _identify = identify;
 
         using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("app.ico"))
             _iconImage = s != null ? new Icon(s, SystemInformation.SmallIconSize) : null;
@@ -184,8 +187,10 @@ internal sealed class TrayIcon : IDisposable
     {
         DisposeItems(_monitorsItem);
         var monitors = _engine.Monitors.Where(m => !m.IsDuplicated).ToList();
-        _monitorsItem.Visible = monitors.Count > 1;
+        _monitorsItem.Visible = _engine.Monitors.Count > 0;
+        _monitorsItem.DropDownItems.Add(new ToolStripMenuItem("Identify", null, (_, _) => _identify()));
         if (monitors.Count < 2) return;
+        _monitorsItem.DropDownItems.Add(new ToolStripSeparator());
 
         _monitorsItem.DropDownItems.Add(new ToolStripMenuItem("Treat as switched off:") { Enabled = false });
         foreach (var m in monitors)
