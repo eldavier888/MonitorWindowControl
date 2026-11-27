@@ -1,17 +1,20 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Windows.Threading;
-using Microsoft.Win32;
+using System.Threading;
 
 namespace MonitorWindowControl;
 
 /// <summary>
 /// Watches for new app windows, moves them to their home monitor, and learns homes
-/// from the foreground window. Everything runs on the UI thread.
+/// from the foreground window. Everything runs on the host's thread (see <see cref="IEngineHost"/>).
+/// The same engine runs in the settings app (tray mode) and in the tiny helper.
 /// </summary>
 public sealed class Engine : IDisposable
 {
+    /// <summary>Held by whichever process is currently watching windows, so two never move the same window.</summary>
+    public const string ActiveMutexName = @"Local\MonitorWindowControl.Active";
+
     private const int PlaceDelayMs = 400;     // apps often reposition themselves right after opening
     private const int RetryMs = 250;          // window still cloaked / untitled
     private const int GiveUpMs = 4000;
@@ -19,31 +22,41 @@ public sealed class Engine : IDisposable
     private const int LearnIntervalMs = 2000;
     private const int LearnChecksNeeded = 2;  // 2 consecutive checks ≈ 4 s
 
-    private readonly Dispatcher _ui;
+    private readonly IEngineHost _host;
     private readonly int _ownPid = Environment.ProcessId;
     private readonly bool _selfElevated;
     private readonly Native.WinEventDelegate _hookProc; // keep a reference so the GC can't collect it
     private IntPtr _hook;
+    private Mutex? _activeMutex;
 
     private readonly HashSet<IntPtr> _handled = new();
     private readonly Dictionary<IntPtr, Pending> _pending = new();
-    private readonly DispatcherTimer _placeTimer;
-    private readonly DispatcherTimer _learnTimer;
-    private readonly DispatcherTimer _displayTimer;
+    private readonly IEngineTimer _placeTimer;
+    private readonly IEngineTimer _learnTimer;
+    private readonly IEngineTimer _displayTimer;
     private List<MonitorInfo> _monitors = new();
     private string _monitorSignature = "";
 
     private string? _streakKey, _streakDevice;
     private int _streakCount, _tickCount;
-    private bool _started, _disposed;
+    private bool _started, _disposed, _learning;
 
     public AppSettings Settings { get; private set; } = new();
     public IReadOnlyList<MonitorInfo> Monitors => _monitors;
     public MonitorInfo? MainMonitor => _monitors.FirstOrDefault(m => m.IsPrimary) ?? _monitors.FirstOrDefault();
     public string LastAction { get; private set; } = "";
 
-    /// <summary>Raised (on the UI thread) when settings, rules or monitors change.</summary>
+    /// <summary>True while this engine watches for new windows (see <see cref="Activate"/>).</summary>
+    public bool IsActive => _hook != IntPtr.Zero;
+
+    /// <summary>Launch-only sessions: only windows of this app are placed (null = all apps).</summary>
+    public string? OnlyAppKey { get; set; }
+
+    /// <summary>Raised (on the engine thread) when settings, rules or monitors change.</summary>
     public event Action? Changed;
+
+    /// <summary>Raised when a new window of an app has been dealt with (moved, or already in place). Argument: app key.</summary>
+    public event Action<string>? WindowHandled;
 
     private sealed class Pending
     {
@@ -54,58 +67,128 @@ public sealed class Engine : IDisposable
         public string AppKey = "";
     }
 
-    public Engine(Dispatcher ui)
+    public Engine(IEngineHost host)
     {
-        _ui = ui;
+        _host = host;
         _hookProc = OnWinEvent;
         _selfElevated = WindowInfo.IsCurrentProcessElevated();
-        _placeTimer = new DispatcherTimer(DispatcherPriority.Normal, ui) { Interval = TimeSpan.FromMilliseconds(100) };
-        _placeTimer.Tick += (_, _) => ProcessPending();
-        _learnTimer = new DispatcherTimer(DispatcherPriority.Background, ui) { Interval = TimeSpan.FromMilliseconds(LearnIntervalMs) };
-        _learnTimer.Tick += (_, _) => LearnTick();
-        _displayTimer = new DispatcherTimer(DispatcherPriority.Normal, ui) { Interval = TimeSpan.FromMilliseconds(1500) };
-        _displayTimer.Tick += (_, _) => { _displayTimer.Stop(); RefreshMonitors(); };
+        _placeTimer = host.CreateTimer(100, ProcessPending);
+        _learnTimer = host.CreateTimer(LearnIntervalMs, LearnTick);
+        IEngineTimer? display = null;
+        display = host.CreateTimer(1500, () => { display!.Stop(); RefreshMonitors(); });
+        _displayTimer = display;
     }
 
-    /// <summary>Loads settings, imports the old .ini on first run, installs the hook. Returns true on first run.</summary>
-    public bool Start()
+    /// <summary>
+    /// Loads settings and monitors (and, in the settings app, imports the old .ini on first run).
+    /// Doesn't watch windows yet: call <see cref="Activate"/> for that. Returns true on first run.
+    /// </summary>
+    public bool Start(bool importLegacy, string who)
     {
-        Paths.MigrateFromOldName();
+        if (importLegacy) Paths.MigrateFromOldName();
         Settings = SettingsStore.Load(out bool existed);
         RefreshMonitors();
-        if (!existed)
+        if (!existed && importLegacy)
         {
             IniImporter.Import(Settings, _monitors);
             Save();
         }
-
-        // Windows that already exist are not "new": never move them.
-        foreach (var h in WindowInfo.EnumTopLevel()) _handled.Add(h);
-
-        _hook = Native.SetWinEventHook(Native.EVENT_OBJECT_DESTROY, Native.EVENT_OBJECT_SHOW, IntPtr.Zero,
-            _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
-        if (_hook == IntPtr.Zero) Log.Write("ERROR: could not install the window hook; new windows won't be detected.");
-
-        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
-        _learnTimer.Start();
         _started = true;
-        Log.Write($"Monitor Window Control started (enabled={Settings.Enabled}, learn={Settings.LearnAutomatically}, " +
+        Log.Write($"{who} started (mode={Settings.RunMode}, enabled={Settings.Enabled}, learn={Settings.LearnAutomatically}, " +
                   $"unknown apps={(Settings.MoveUnknownToMain ? "main monitor" : "leave")}, admin={_selfElevated}).");
         return !existed;
     }
 
+    /// <summary>
+    /// Starts watching for new windows (and learning, if <paramref name="learn"/>).
+    /// Returns false if another process is already watching (it holds <see cref="ActiveMutexName"/>).
+    /// </summary>
+    public bool Activate(bool learn, bool claimActive = true)
+    {
+        if (IsActive) return true;
+        if (claimActive)
+        {
+            // Tray app and background helper: only one of them may place windows at a time.
+            // (Launch-shortcut sessions don't claim this; they only place their own app's new window.)
+            _activeMutex = new Mutex(true, ActiveMutexName, out bool createdNew);
+            if (!createdNew)
+            {
+                _activeMutex.Dispose(); _activeMutex = null;
+                return false;
+            }
+        }
+
+        // Windows already on screen are not "new": never move them. Hidden ones (apps sitting in the tray)
+        // count as new when they're shown, like an app being opened.
+        _handled.Clear();
+        foreach (var h in WindowInfo.EnumTopLevel())
+            if (Native.IsWindowVisible(h)) _handled.Add(h);
+
+        _hook = Native.SetWinEventHook(Native.EVENT_OBJECT_DESTROY, Native.EVENT_OBJECT_SHOW, IntPtr.Zero,
+            _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+        if (_hook == IntPtr.Zero)
+        {
+            Log.Write("ERROR: could not install the window hook; new windows won't be detected.");
+            ReleaseActiveMutex();
+            return false;
+        }
+        _learning = learn;
+        _learnTimer.Start(); // also keeps settings fresh when another process changes them
+        return true;
+    }
+
+    /// <summary>Stops watching windows (settings stay loaded; the window/UI keeps working).</summary>
+    public void Deactivate()
+    {
+        _placeTimer.Stop(); _learnTimer.Stop();
+        if (_hook != IntPtr.Zero) { Native.UnhookWinEvent(_hook); _hook = IntPtr.Zero; }
+        _pending.Clear(); _handled.Clear(); ResetStreak();
+        ReleaseActiveMutex();
+    }
+
+    private void ReleaseActiveMutex()
+    {
+        if (_activeMutex == null) return;
+        try { _activeMutex.ReleaseMutex(); } catch { }
+        _activeMutex.Dispose(); _activeMutex = null;
+    }
+
+    /// <summary>True if some process (this one or another) is currently watching windows.</summary>
+    public static bool AnyProcessActive()
+    {
+        if (!Mutex.TryOpenExisting(ActiveMutexName, out var m)) return false;
+        m.Dispose();
+        return true;
+    }
+
+    // ------------------------------------------------------------------ settings shared between processes
+
+    /// <summary>
+    /// Re-reads settings.json if another process (settings window or helper) changed it.
+    /// Returns true if something was reloaded. A file that can't be read right now is simply retried later.
+    /// </summary>
+    public bool ReloadIfChanged()
+    {
+        if (!_started || !SettingsStore.ChangedOnDisk()) return false;
+        var fresh = SettingsStore.TryReload();
+        if (fresh == null) return false;
+        Settings = fresh;
+        _monitorSignature = ""; // names/numbers may have changed
+        RefreshMonitors();
+        ResetStreak();
+        Changed?.Invoke();
+        return true;
+    }
+
     // ------------------------------------------------------------------ monitors
 
-    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    /// <summary>The host calls this when Windows reports a display change. Refreshes now and again once Windows has settled.</summary>
+    public void OnDisplaySettingsChanged()
     {
-        // Can arrive on another thread. Refresh now and again once Windows has settled.
-        _ui.BeginInvoke(() =>
-        {
-            if (_disposed) return;
-            RefreshMonitors();
-            _displayTimer.Stop();
-            _displayTimer.Start();
-        });
+        if (_disposed) return;
+        RefreshMonitors();
+        _displayTimer.Stop();
+        _displayTimer.Start();
     }
 
     public void RefreshMonitors()
@@ -187,8 +270,9 @@ public sealed class Engine : IDisposable
             return;
         }
 
-        if (!Settings.Enabled || _handled.Contains(hwnd) || _pending.ContainsKey(hwnd)) return;
+        if (_handled.Contains(hwnd) || _pending.ContainsKey(hwnd)) return;
         if (Native.GetAncestor(hwnd, Native.GA_ROOT) != hwnd) return; // not top-level
+        // (Enabled is checked when the window is placed, after settings are refreshed from disk.)
 
         var now = DateTime.UtcNow;
         _pending[hwnd] = new Pending { Due = now.AddMilliseconds(PlaceDelayMs), GiveUp = now.AddMilliseconds(GiveUpMs) };
@@ -235,17 +319,44 @@ public sealed class Engine : IDisposable
         // A real app window: handle it exactly once.
         _pending.Remove(hwnd);
         _handled.Add(hwnd);
+        ReloadIfChanged();
         if (!Settings.Enabled) return;
 
         var app = WindowInfo.Identify(hwnd);
         if (app == null) return;
+        if (OnlyAppKey != null && !string.Equals(app.Key, OnlyAppKey, StringComparison.OrdinalIgnoreCase)) return;
         string title = WindowInfo.GetTitle(hwnd);
 
         var rule = Settings.Find(app.Key);
-        if (rule != null && rule.DisplayName != app.DisplayName && string.Equals(rule.DisplayName, rule.Key, StringComparison.OrdinalIgnoreCase))
-        {   // imported entries only know the exe name: pick up the friendly name now
-            rule.DisplayName = app.DisplayName; Save(); Changed?.Invoke();
-        }
+        if (rule != null) rule = RefreshRuleDetails(rule, app, hwnd);
+        try { PlaceNewWindow(hwnd, app, rule, title); }
+        finally { WindowHandled?.Invoke(app.Key); }
+    }
+
+    /// <summary>
+    /// Keeps a saved app's details current from one of its windows: the friendly name (imported entries only know
+    /// the exe), and how to start it (for launch shortcuts; apps that update themselves can move to a new folder).
+    /// </summary>
+    private AppRule RefreshRuleDetails(AppRule rule, AppIdentity app, IntPtr hwnd)
+    {
+        bool nameStale = rule.DisplayName != app.DisplayName && string.Equals(rule.DisplayName, rule.Key, StringComparison.OrdinalIgnoreCase);
+        string? target = WindowInfo.GetLaunchTarget(hwnd);
+        bool targetStale = target != null && !string.Equals(target, rule.LaunchTarget, StringComparison.OrdinalIgnoreCase);
+        if (!nameStale && !targetStale) return rule;
+
+        using var _ = SettingsStore.Lock();
+        ReloadIfChanged();
+        var fresh = Settings.Find(rule.Key);
+        if (fresh == null) return rule;
+        if (nameStale) fresh.DisplayName = app.DisplayName;
+        if (targetStale) fresh.LaunchTarget = target;
+        Save();
+        Changed?.Invoke();
+        return fresh;
+    }
+
+    private void PlaceNewWindow(IntPtr hwnd, AppIdentity app, AppRule? rule, string title)
+    {
         MonitorInfo? target;
         string reason;
         if (rule != null && rule.NeverMove) return;
@@ -315,6 +426,8 @@ public sealed class Engine : IDisposable
     private void LearnTick()
     {
         if (++_tickCount % 30 == 0) _handled.RemoveWhere(h => !Native.IsWindow(h)); // safety net, ~every minute
+        ReloadIfChanged(); // pick up changes made in the settings window / by the helper
+        if (!_learning) return;
 
         // "Where I used it last" apps are tracked even with automatic learning off: you asked for it per app.
         if (!Settings.Enabled || (!Settings.LearnAutomatically && !Settings.Apps.Any(a => a.FollowLastUsed)))
@@ -333,14 +446,17 @@ public sealed class Engine : IDisposable
         if (app.Key == _streakKey && mon.DeviceName == _streakDevice) _streakCount++;
         else { _streakKey = app.Key; _streakDevice = mon.DeviceName; _streakCount = 1; }
 
-        if (_streakCount >= LearnChecksNeeded) Learn(app, mon);
+        if (_streakCount >= LearnChecksNeeded) Learn(app, mon, fg);
     }
 
     private void ResetStreak() { _streakKey = null; _streakDevice = null; _streakCount = 0; }
 
-    private void Learn(AppIdentity app, MonitorInfo mon)
+    private void Learn(AppIdentity app, MonitorInfo mon, IntPtr hwnd)
     {
+        using var _ = SettingsStore.Lock();
+        ReloadIfChanged();
         var rule = Settings.Find(app.Key);
+        if (rule != null) rule = RefreshRuleDetails(rule, app, hwnd);
         if (rule != null && rule.FollowLastUsed)
         {
             // Remember the last monitor you used it on, if it's one of the monitors you picked for it.
@@ -364,7 +480,7 @@ public sealed class Engine : IDisposable
         }
 
         string? old = rule == null ? null : (rule.MonitorName ?? rule.MonitorDevice);
-        if (rule == null) { rule = new AppRule { Key = app.Key }; Settings.Apps.Add(rule); }
+        if (rule == null) { rule = new AppRule { Key = app.Key, LaunchTarget = WindowInfo.GetLaunchTarget(hwnd) }; Settings.Apps.Add(rule); }
         rule.DisplayName = app.DisplayName;
         rule.MonitorDevice = mon.DeviceName;
         rule.MonitorName = mon.FriendlyName;
@@ -380,6 +496,8 @@ public sealed class Engine : IDisposable
 
     public void SetEnabled(bool on)
     {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
         if (Settings.Enabled == on) return;
         Settings.Enabled = on; Save();
         Log.Write(on ? "Enabled." : "Disabled.");
@@ -388,6 +506,8 @@ public sealed class Engine : IDisposable
 
     public void SetLearn(bool on)
     {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
         if (Settings.LearnAutomatically == on) return;
         Settings.LearnAutomatically = on; Save(); ResetStreak();
         Log.Write("Learn automatically: " + (on ? "on" : "off"));
@@ -396,6 +516,8 @@ public sealed class Engine : IDisposable
 
     public void SetMoveUnknownToMain(bool on)
     {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
         if (Settings.MoveUnknownToMain == on) return;
         Settings.MoveUnknownToMain = on; Save();
         Log.Write("Apps it hasn't learned yet: " + (on ? "open on main monitor" : "leave where Windows puts them"));
@@ -408,12 +530,15 @@ public sealed class Engine : IDisposable
     /// </summary>
     public void Pin(string key, MonitorInfo? monitor, string? displayName = null)
     {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
         var rule = Settings.Find(key);
         if (rule == null)
         {
             rule = new AppRule { Key = key, DisplayName = displayName ?? key };
             Settings.Apps.Add(rule);
         }
+        rule.LaunchTarget ??= FindLaunchTarget(key);
         rule.Pinned = true;
         rule.NeverMove = monitor == null;
         rule.FollowLastUsed = false;
@@ -440,12 +565,15 @@ public sealed class Engine : IDisposable
     /// </summary>
     public void SetFollowLastUsed(string key, IReadOnlyList<MonitorInfo> allowed, MonitorInfo? currentMonitor, string? displayName = null)
     {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
         var rule = Settings.Find(key);
         if (rule == null)
         {
             rule = new AppRule { Key = key, DisplayName = displayName ?? key };
             Settings.Apps.Add(rule);
         }
+        rule.LaunchTarget ??= FindLaunchTarget(key);
         rule.Pinned = true;
         rule.NeverMove = false;
         rule.FollowLastUsed = true;
@@ -511,6 +639,8 @@ public sealed class Engine : IDisposable
     /// </summary>
     public void RenameMonitor(MonitorInfo m, string? nickname, int? number)
     {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
         nickname = string.IsNullOrWhiteSpace(nickname) ? null : nickname.Trim();
         string old = m.Name;
         Settings.MonitorNicknames.RemoveAll(n => Matches(n.Monitor, m));
@@ -527,6 +657,63 @@ public sealed class Engine : IDisposable
         RefreshMonitors();
         var now = _monitors.FirstOrDefault(x => x.DeviceName == m.DeviceName);
         Note($"Monitor {old} is now shown as {now?.Name ?? m.FriendlyName}.", $"[{m.DeviceName}]");
+        Changed?.Invoke();
+    }
+
+    /// <summary>How to start an app (for launch-only shortcuts), taken from one of its open windows. Null if none is open.</summary>
+    public string? FindLaunchTarget(string key)
+    {
+        foreach (var h in WindowInfo.EnumTopLevel())
+        {
+            if (WindowInfo.Classify(h, _ownPid) != WindowInfo.Kind.AppWindow) continue;
+            var app = WindowInfo.Identify(h);
+            if (app != null && string.Equals(app.Key, key, StringComparison.OrdinalIgnoreCase))
+                return WindowInfo.GetLaunchTarget(h);
+        }
+        return null;
+    }
+
+    /// <summary>Records how to start a saved app (from one of its open windows), if not known yet.</summary>
+    public void UpdateLaunchTarget(string key)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var rule = Settings.Find(key);
+        if (rule == null || rule.LaunchTarget != null) return;
+        rule.LaunchTarget = FindLaunchTarget(key);
+        if (rule.LaunchTarget != null) Save();
+    }
+
+    /// <summary>Records the file name of an app's launch shortcut (null when it's removed).</summary>
+    public void SetShortcutFile(string key, string? file)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var rule = Settings.Find(key);
+        if (rule == null || rule.ShortcutFile == file) return;
+        rule.ShortcutFile = file; Save();
+        Changed?.Invoke();
+    }
+
+    /// <summary>Stores how the app runs (see <see cref="RunModes"/>). The program applies it (tray, helper, shortcuts).</summary>
+    public void SetRunMode(string mode)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        mode = RunModes.Normalize(mode);
+        if (Settings.RunMode == mode) return;
+        Settings.RunMode = mode; Save();
+        Log.Write("How it runs: " + mode);
+        Changed?.Invoke();
+    }
+
+    public void SetStartWithWindows(bool on)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (Settings.StartWithWindows == on) return;
+        Settings.StartWithWindows = on; Save();
+        Log.Write("Start with Windows: " + (on ? "on" : "off"));
         Changed?.Invoke();
     }
 
@@ -581,6 +768,8 @@ public sealed class Engine : IDisposable
 
     public void Forget(string key)
     {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
         var rule = Settings.Find(key);
         if (rule == null) return;
         Settings.Apps.Remove(rule);
@@ -591,6 +780,8 @@ public sealed class Engine : IDisposable
 
     public void ForgetAll()
     {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
         int n = Settings.Apps.Count;
         Settings.Apps.Clear();
         Save(); ResetStreak();
@@ -611,11 +802,9 @@ public sealed class Engine : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _placeTimer.Stop(); _learnTimer.Stop(); _displayTimer.Stop();
-        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
-        if (_hook != IntPtr.Zero) { Native.UnhookWinEvent(_hook); _hook = IntPtr.Zero; }
-        _pending.Clear(); _handled.Clear();
-        if (_started) { Save(); Log.Write("Monitor Window Control stopped."); }
+        Deactivate();
+        _displayTimer.Stop();
+        if (_started) Log.Write("Stopped.");
     }
 }
 

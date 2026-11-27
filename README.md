@@ -8,7 +8,7 @@ It learns homes by itself: when you use an app on a monitor for a few seconds, t
   <img src="docs/screenshot.png" alt="Monitor Window Control window: toggles, the three connected monitors by model name, and a list of apps with the monitor each one opens on" width="560">
 </p>
 
-**[⬇ Download MonitorWindowControl.exe](../../releases/latest/download/MonitorWindowControl.exe)** (6 MB, Windows 10/11, no install)
+**[⬇ Download MonitorWindowControl.exe](../../releases/latest/download/MonitorWindowControl.exe)** (8 MB, Windows 10/11, no install)
 
 ## Why
 
@@ -46,10 +46,26 @@ Stop the AutoHotkey script so the two don't both move windows.
 Requirements: Windows 10 or 11, 64-bit. The exe isn't code-signed, so Windows SmartScreen may warn the first
 time. Choose *More info → Run anyway*.
 
+## How it runs: your choice
+
+Something has to notice a new window to move it, because Windows has no "open this app on that monitor"
+setting of its own. So you choose how much runs in the background (**How it runs**, at the top of the window):
+
+| Mode | What runs in the background | What gets placed |
+|---|---|---|
+| **In the tray** (default) | The app, in the tray (about 0% CPU, ~30 MB) | Every new window. Learns where you use apps. |
+| **Tiny invisible helper** | Only a small helper: no window, no tray icon (about 0% CPU, ~5 MB). The settings window runs only while it's open. | Every new window. Learns where you use apps. |
+| **Nothing in the background** | Nothing at all | Only apps you open from their **launch shortcuts** (Start menu → Monitor Window Control). A helper starts with the app, places its window, and exits after a few seconds. Windows opened any other way (links, apps opening extra windows, autostart) aren't moved, and nothing is learned automatically. |
+
+To make a launch shortcut: select an app in the list, save where it opens, then press **Create launch shortcut**.
+It appears in Start menu → Monitor Window Control (right-click it → *Pin to taskbar* if you like); you can also
+put one on the desktop. Your existing shortcuts are never changed. Launch shortcuts work in every mode.
+
 ## Using it
 
-- **Tray icon**: double-click to open the window. Right-click for *Open*, *Enabled* (pause/resume), *Exit*.
-  Closing the window just puts it back in the tray.
+- **Tray icon** (tray mode): double-click to open the window. Right-click for *Open*, *Enabled* (pause/resume), *Exit*.
+  Closing the window just puts it back in the tray. In the other modes there's no tray icon: start
+  `MonitorWindowControl.exe` again to change settings, and closing its window closes it completely.
 - **Enabled**: moves new windows to their app's monitor.
 - **Learn automatically**: only the window you're actually using counts. If the same app stays focused on the
   same monitor for two checks in a row (about 4 seconds), that monitor becomes its home. Windows sitting in the
@@ -93,29 +109,41 @@ Windows that run as administrator can't be moved by a normal app; Monitor Window
 - `settings.json`: settings and the list of apps and their monitors.
 - `monitorwindowcontrol.log`: the activity log (kept to about 1 MB).
 
-To start completely fresh: Exit Monitor Window Control from the tray, delete that folder, start it again.
+The tiny helper is unpacked to `%LocalAppData%\MonitorWindowControl\MonitorWindowControlHelper.exe` when a mode
+or shortcut needs it.
+
+To start completely fresh: Exit Monitor Window Control (tray → Exit, or set "How it runs" to tray first),
+delete those folders and Start menu → Monitor Window Control, then start it again.
 
 ## Build it yourself (optional)
 
 You only need this if you change the code.
 
-1. Install the [.NET SDK](https://dotnet.microsoft.com/download) (8 or newer).
-2. Open PowerShell in the `MonitorWindowControl` folder (the one with `MonitorWindowControl.csproj`) and run:
+1. Install the [.NET SDK](https://dotnet.microsoft.com/download) 10 (or newer), and Visual Studio's
+   **Desktop development with C++** tools (the helper is compiled to native code and needs the C++ linker).
+2. Open PowerShell in this folder and run:
 
 ```powershell
-dotnet publish -c Release -o ..\publish
+.\build.ps1
 ```
 
-The result is `publish\MonitorWindowControl.exe` (about 6 MB, needs the .NET Desktop Runtime 8 or newer).
+The result is `publish\MonitorWindowControl.exe` (about 8 MB, needs the .NET Desktop Runtime 8 or newer;
+the 2.4 MB native helper is packed inside it).
 
 Project layout:
 
 - `MonitorWindowControl\Engine.cs`: detects new windows, decides and moves them, and does the learning
+  (shared by the app and the helper; runs on whatever `IEngineHost` the program provides, see `Host.cs`)
 - `MonitorWindowControl\Monitors.cs`: lists monitors and their model names
-- `MonitorWindowControl\WindowInfo.cs`: decides which windows are real app windows, and which app they belong to
-- `MonitorWindowControl\Storage.cs`: settings file, log, Start with Windows, import of the old `.ini`
-- `MonitorWindowControl\MainWindow.xaml`, `TrayIcon.cs`, `App.xaml.cs`: the window, tray icon and app startup
-- `MonitorWindowControl\tools\make-icon.ps1`: regenerates `app.ico`; `tools\rebuild-and-run.ps1`: developer helper
+- `MonitorWindowControl\WindowInfo.cs`: decides which windows are real app windows, which app they belong to,
+  and how to start that app again
+- `MonitorWindowControl\Storage.cs`: settings file (shared safely by the app and the helper), log, Start with Windows,
+  import of the old `.ini`
+- `MonitorWindowControl\MainWindow.xaml`, `TrayIcon.cs`, `App.xaml.cs`: the window, tray icon, app startup and run modes
+- `MonitorWindowControl\HelperManager.cs`, `ShortcutManager.cs`: unpacking/starting the helper; launch shortcuts
+- `MonitorWindowControlHelper\`: the tiny native helper (`Program.cs`: background and `--launch` modes;
+  `NativeHost.cs`: its Windows message loop)
+- `MonitorWindowControl\tools\make-icon.ps1`: regenerates `app.ico`
 
 Tech: C# / .NET 8, WPF with the WPF-UI library (Windows 11 Fluent look, Mica, follows light/dark mode),
-PerMonitorV2 DPI awareness.
+PerMonitorV2 DPI awareness. The helper: C# compiled with .NET 10 NativeAOT (no .NET needed to run it).

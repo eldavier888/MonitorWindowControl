@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The tiny background helper: compiled straight to machine code (NativeAOT), so it needs no .NET
+    installed, starts instantly and uses only a few MB. It shares the engine source with the settings app.
+    Build it with build.ps1 (it needs the Visual Studio C++ build tools for the native linker).
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- Pinned to a patched servicing release; this also selects the matching (patched) native compiler. -->
+    <RuntimeFrameworkVersion>10.0.15</RuntimeFrameworkVersion>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <StackTraceSupport>false</StackTraceSupport>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>MonitorWindowControlHelper</AssemblyName>
+    <RootNamespace>MonitorWindowControl</RootNamespace>
+    <ApplicationManifest>..\MonitorWindowControl\app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\MonitorWindowControl\app.ico</ApplicationIcon>
+    <Version>1.4.0</Version>
+    <Product>Monitor Window Control</Product>
+    <AssemblyTitle>Monitor Window Control helper</AssemblyTitle>
+    <!-- Shared files use platform APIs; this is Windows-only anyway. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\MonitorWindowControl\Native.cs" Link="Shared\Native.cs" />
+    <Compile Include="..\MonitorWindowControl\Monitors.cs" Link="Shared\Monitors.cs" />
+    <Compile Include="..\MonitorWindowControl\WindowInfo.cs" Link="Shared\WindowInfo.cs" />
+    <Compile Include="..\MonitorWindowControl\Storage.cs" Link="Shared\Storage.cs" />
+    <Compile Include="..\MonitorWindowControl\Engine.cs" Link="Shared\Engine.cs" />
+    <Compile Include="..\MonitorWindowControl\Host.cs" Link="Shared\Host.cs" />
+  </ItemGroup>
+
+</Project>
+

@@ -38,8 +38,25 @@
                 <TextBlock FontSize="14" TextWrapping="Wrap"
                            Text="Opens each app's windows on the monitor you actually use that app on. It learns by noticing which monitor you work with each app on." />
 
+                <!-- How it runs -->
+                <ui:Card Margin="0,16,0,0" Padding="16,12">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBlock Text="How it runs" FontSize="14" VerticalAlignment="Center" />
+                            <ComboBox x:Name="RunModeCombo" Grid.Column="1" MinWidth="330" SelectionChanged="RunModeCombo_SelectionChanged">
+                                <ComboBoxItem Content="In the tray (catches every window)" Tag="Tray" />
+                                <ComboBoxItem Content="Tiny invisible helper, no tray icon" Tag="Helper" />
+                                <ComboBoxItem Content="Nothing in the background (shortcuts only)" Tag="LaunchOnly" />
+                            </ComboBox>
+                        </Grid>
+                        <TextBlock x:Name="RunModeHint" Style="{StaticResource Secondary}" Margin="0,8,0,0" />
+                        <TextBlock x:Name="BackgroundStatusText" Style="{StaticResource Secondary}" Margin="0,4,0,0" FontWeight="SemiBold" />
+                    </StackPanel>
+                </ui:Card>
+
                 <!-- Toggles -->
-                <ui:Card Margin="0,16,0,0" Padding="16,8">
+                <ui:Card Margin="0,8,0,0" Padding="16,8">
                     <StackPanel>
                         <Grid Margin="0,6">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
@@ -54,7 +71,7 @@
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <StackPanel VerticalAlignment="Center">
                                 <TextBlock Text="Learn automatically" FontSize="14" />
-                                <TextBlock Style="{StaticResource Secondary}" Text="When you use an app on a monitor for a few seconds, that becomes its home. Only the window you're using counts." />
+                                <TextBlock x:Name="LearnHint" Style="{StaticResource Secondary}" Text="When you use an app on a monitor for a few seconds, that becomes its home. Only the window you're using counts." />
                             </StackPanel>
                             <ui:ToggleSwitch x:Name="LearnToggle" Grid.Column="1" Click="LearnToggle_Click" />
                         </Grid>
@@ -63,7 +80,7 @@
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <StackPanel VerticalAlignment="Center">
                                 <TextBlock Text="Start with Windows" FontSize="14" />
-                                <TextBlock Style="{StaticResource Secondary}" Text="Runs quietly in the tray when you sign in." />
+                                <TextBlock x:Name="StartupHint" Style="{StaticResource Secondary}" Text="Runs quietly in the tray when you sign in." />
                             </StackPanel>
                             <ui:ToggleSwitch x:Name="StartupToggle" Grid.Column="1" Click="StartupToggle_Click" />
                         </Grid>
@@ -173,7 +190,16 @@
                                     <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
                                 </ItemsControl.ItemsPanel>
                             </ItemsControl>
+                            <TextBlock x:Name="LastUsedLaunchOnlyNote" Style="{StaticResource Secondary}" Margin="0,4,0,0" Visibility="Collapsed"
+                                       Text="Note: with nothing running in the background, Monitor Window Control can't see where you use the app, so it opens where it was used when you last changed this." />
                         </StackPanel>
+                        <!-- Launch shortcut (the way to use "nothing in the background"; works in every mode) -->
+                        <Separator Margin="0,12,0,8" />
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBlock x:Name="ShortcutStatus" Style="{StaticResource Secondary}" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,10,0" />
+                            <ui:Button x:Name="ShortcutButton" Grid.Column="1" Content="Create launch shortcut" Click="Shortcut_Click" />
+                        </Grid>
                     </StackPanel>
                 </ui:Card>
                 <TextBlock x:Name="SelectionHint" Style="{StaticResource Secondary}" Margin="2,6,0,0"

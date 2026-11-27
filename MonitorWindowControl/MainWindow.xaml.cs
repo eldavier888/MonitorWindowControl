@@ -29,20 +29,27 @@ public partial class MainWindow : FluentWindow
     private const string NeverMoveLabel = "Never move this app";
     private const string LastUsedLabel = "Where I used it last…";
     private readonly Engine _engine;
+    private readonly App _app;
     private readonly System.Windows.Threading.DispatcherTimer _openAppsTimer;
     private bool _updating;
     private string? _panelKey;   // which row the "Open it on" box was last filled for
     private string _panelState = "";
 
-    public MainWindow(Engine engine)
+    public MainWindow(Engine engine, App app)
     {
         _engine = engine;
+        _app = app;
         InitializeComponent();
         SystemThemeWatcher.Watch(this, WindowBackdropType.Mica, true);
         _engine.Changed += Refresh;
-        // While this window is open, keep the "open now" apps current (apps get opened and closed).
+        // While this window is open, keep the "open now" apps current (apps get opened and closed),
+        // and pick up what the helper learned meanwhile.
         _openAppsTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
-        _openAppsTimer.Tick += (_, _) => RefreshAppList(background: true);
+        _openAppsTimer.Tick += (_, _) =>
+        {
+            if (!_engine.ReloadIfChanged()) RefreshAppList(background: true); // a reload refreshes everything itself
+            BackgroundStatusText.Text = _app.BackgroundStatus();
+        };
         _openAppsTimer.Start();
         Refresh();
     }
@@ -71,8 +78,31 @@ public partial class MainWindow : FluentWindow
             var s = _engine.Settings;
             EnabledToggle.IsChecked = s.Enabled;
             LearnToggle.IsChecked = s.LearnAutomatically;
-            StartupToggle.IsChecked = StartupManager.IsEnabled();
+            StartupToggle.IsChecked = s.StartWithWindows == true;
             UnknownCombo.SelectedIndex = s.MoveUnknownToMain ? 0 : 1;
+
+            RunModeCombo.SelectedItem = RunModeCombo.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == s.RunMode);
+            bool launchOnly = s.RunMode == RunModes.LaunchOnly;
+            RunModeHint.Text = s.RunMode switch
+            {
+                RunModes.Helper => "A tiny helper (a few MB, no tray icon) places every new window and learns where you use apps. " +
+                                   "This settings window only runs while it's open.",
+                RunModes.LaunchOnly => "Nothing runs in the background. Create a launch shortcut for an app below (Start menu → Monitor Window Control) " +
+                                       "and open it from there: it opens on its monitor, then nothing keeps running. Windows opened another way aren't moved.",
+                _ => "Monitor Window Control stays in the tray, places every new window and learns where you use apps.",
+            };
+            BackgroundStatusText.Text = _app.BackgroundStatus();
+            StartupToggle.IsEnabled = !launchOnly;
+            StartupHint.Text = s.RunMode switch
+            {
+                RunModes.Helper => "Starts the tiny helper when you sign in (no window, no tray icon).",
+                RunModes.LaunchOnly => "Not needed: nothing has to run in the background.",
+                _ => "Runs quietly in the tray when you sign in.",
+            };
+            LearnToggle.IsEnabled = !launchOnly;
+            LearnHint.Text = launchOnly
+                ? "Needs something running in the background to notice where you use apps; set apps' monitors below instead."
+                : "When you use an app on a monitor for a few seconds, that becomes its home. Only the window you're using counts.";
             LastActionText.Text = _engine.LastAction;
             LastActionText.Visibility = string.IsNullOrEmpty(_engine.LastAction) ? Visibility.Collapsed : Visibility.Visible;
 
@@ -162,6 +192,7 @@ public partial class MainWindow : FluentWindow
         var rule = row == null ? null : _engine.Settings.Find(row.Key);
         SelectionPanel.IsEnabled = row != null;
         ForgetButton.IsEnabled = rule != null;
+        UpdateShortcutRow(row, rule);
 
         // Don't reset what the user is picking unless the selection or that app's setting changed.
         string state = row == null ? "" :
@@ -191,8 +222,73 @@ public partial class MainWindow : FluentWindow
         UpdateAllowedPanel();
     }
 
-    private void UpdateAllowedPanel() =>
+    private void UpdateAllowedPanel()
+    {
         AllowedPanel.Visibility = TargetCombo.SelectedItem as string == LastUsedLabel ? Visibility.Visible : Visibility.Collapsed;
+        LastUsedLaunchOnlyNote.Visibility = _engine.Settings.RunMode == RunModes.LaunchOnly ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>The "launch shortcut" line for the selected app.</summary>
+    private void UpdateShortcutRow(AppRow? row, AppRule? rule)
+    {
+        bool launchOnly = _engine.Settings.RunMode == RunModes.LaunchOnly;
+        if (row == null) { ShortcutStatus.Text = ""; ShortcutButton.IsEnabled = false; return; }
+        if (rule == null)
+        {
+            ShortcutStatus.Text = "Save where it opens first; then you can make a launch shortcut for it.";
+            ShortcutButton.Content = "Create launch shortcut";
+            ShortcutButton.IsEnabled = false;
+            return;
+        }
+        bool exists = ShortcutManager.Exists(rule);
+        ShortcutButton.IsEnabled = true;
+        ShortcutButton.Content = exists ? "Remove shortcut" : "Create launch shortcut";
+        ShortcutStatus.Text = exists
+            ? $"Shortcut: Start menu → Monitor Window Control → {rule.ShortcutFile}. Opening it from there puts it on its monitor."
+            : launchOnly
+                ? "Make a shortcut so this app opens on its monitor without anything running in the background."
+                : "Optional: a shortcut that places the app even when nothing runs in the background.";
+    }
+
+    /// <summary>The Start menu shortcut exists even if only the desktop copy failed.</summary>
+    private static bool ShortcutManagerStartMenuMade(string error) => error.StartsWith("The Start menu shortcut was created", StringComparison.Ordinal);
+
+    private async void Shortcut_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppsList.SelectedItem is not AppRow row || _engine.Settings.Find(row.Key) is not AppRule rule) return;
+        if (ShortcutManager.Exists(rule))
+        {
+            ShortcutManager.Delete(rule);
+            _engine.SetShortcutFile(rule.Key, null);
+            _panelState = ""; UpdateSelectionPanel();
+            return;
+        }
+        if (rule.LaunchTarget == null) _engine.UpdateLaunchTarget(rule.Key);
+        rule = _engine.Settings.Find(row.Key) ?? rule;
+
+        var desktop = new CheckBox { Content = "Also put it on the desktop", IsChecked = false, Margin = new Thickness(0, 10, 0, 0) };
+        var content = new StackPanel();
+        content.Children.Add(new System.Windows.Controls.TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap,
+            Text = $"This adds \"{ShortcutManager.FileName(rule, _engine.Settings.Apps)}\" to Start menu → Monitor Window Control. Opening the app from it " +
+                   "puts its window on its monitor; a tiny helper does that and exits after a few seconds. " +
+                   "Tip: right-click it there and choose \"Pin to taskbar\". Your existing shortcuts aren't changed.",
+        });
+        content.Children.Add(desktop);
+        var box = new Wpf.Ui.Controls.MessageBox
+        {
+            Title = $"Launch shortcut for {ShortcutManager.ShortcutName(rule)}", Content = content,
+            PrimaryButtonText = "Create", CloseButtonText = "Cancel",
+        };
+        if (await box.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
+
+        string? error = ShortcutManager.Create(rule, _engine.Settings.Apps, desktop.IsChecked == true, out string file);
+        if (error == null || ShortcutManagerStartMenuMade(error)) _engine.SetShortcutFile(rule.Key, file);
+        if (error != null)
+            await new Wpf.Ui.Controls.MessageBox { Title = "Shortcut", Content = error, CloseButtonText = "OK" }.ShowDialogAsync();
+        _panelState = ""; UpdateSelectionPanel();
+    }
 
     private void TargetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateAllowedPanel();
 
@@ -218,19 +314,17 @@ public partial class MainWindow : FluentWindow
 
     private void LearnToggle_Click(object sender, RoutedEventArgs e) => _engine.SetLearn(LearnToggle.IsChecked == true);
 
-    private void StartupToggle_Click(object sender, RoutedEventArgs e)
+    private void StartupToggle_Click(object sender, RoutedEventArgs e) =>
+        _app.ChangeStartWithWindows(StartupToggle.IsChecked == true);
+
+    private void RunModeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        bool on = StartupToggle.IsChecked == true;
-        try
-        {
-            StartupManager.Set(on);
-            Log.Write("Start with Windows: " + (on ? "on" : "off"));
-        }
-        catch (Exception ex)
-        {
-            Log.Write("Could not change Start with Windows: " + ex.Message);
-        }
-        StartupToggle.IsChecked = StartupManager.IsEnabled();
+        if (_updating || RunModeCombo.SelectedItem is not ComboBoxItem item) return;
+        string mode = (string)item.Tag;
+        if (mode == _engine.Settings.RunMode) return;
+        _app.ChangeRunMode(mode);
+        _panelState = "";
+        Refresh();
     }
 
     private void UnknownCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -310,7 +404,9 @@ public partial class MainWindow : FluentWindow
 
     private void Forget_Click(object sender, RoutedEventArgs e)
     {
-        if (AppsList.SelectedItem is AppRow row) _engine.Forget(row.Key);
+        if (AppsList.SelectedItem is not AppRow row) return;
+        if (_engine.Settings.Find(row.Key) is AppRule rule) ShortcutManager.Delete(rule); // its launch shortcut goes too
+        _engine.Forget(row.Key);
     }
 
     private async void ForgetAll_Click(object sender, RoutedEventArgs e)
@@ -324,7 +420,9 @@ public partial class MainWindow : FluentWindow
             CloseButtonText = "Cancel",
         };
         var result = await box.ShowDialogAsync();
-        if (result == Wpf.Ui.Controls.MessageBoxResult.Primary) _engine.ForgetAll();
+        if (result != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
+        foreach (var rule in _engine.Settings.Apps.ToList()) ShortcutManager.Delete(rule);
+        _engine.ForgetAll();
     }
 
     private void OpenLog_Click(object sender, RoutedEventArgs e)

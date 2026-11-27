@@ -34,10 +34,20 @@ internal static class WindowInfo
     private const string StoreHostExe = "applicationframehost.exe";
     private static readonly Dictionary<string, string> DescriptionCache = new(StringComparer.OrdinalIgnoreCase);
 
+    // Our own programs: the settings window must never be moved or "learned" by the helper (and vice versa).
+    private static readonly HashSet<string> OwnExes = new(StringComparer.OrdinalIgnoreCase)
+        { "monitorwindowcontrol.exe", "monitorwindowcontrolhelper.exe" };
+    private static bool IsOwnProcess(int pid, int ownPid)
+    {
+        if (pid == ownPid) return true;
+        string? path = GetProcessPath(pid); // cheap; no cache, since process ids get reused
+        return path != null && OwnExes.Contains(Path.GetFileName(path));
+    }
+
     public static Kind Classify(IntPtr h, int ownPid)
     {
         if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) return Kind.Hidden;
-        if (GetPid(h) == ownPid) return Kind.Never;
+        if (IsOwnProcess(GetPid(h), ownPid)) return Kind.Never;
         if (Native.GetAncestor(h, Native.GA_ROOT) != h) return Kind.Never;
         if (Native.GetWindow(h, Native.GW_OWNER) != IntPtr.Zero) return Kind.Never;
 
@@ -82,6 +92,81 @@ internal static class WindowInfo
             DescriptionCache[path] = desc;
         }
         return new AppIdentity(exe, string.IsNullOrWhiteSpace(desc) ? exe : desc, false);
+    }
+
+    /// <summary>
+    /// How to start this window's app again, for launch-only shortcuts:
+    /// "aumid:Package!App" for Store/packaged apps (they can't be started from their exe), else "exe:full path".
+    /// Null if it can't be determined (e.g. the process is protected).
+    /// </summary>
+    public static string? GetLaunchTarget(IntPtr h)
+    {
+        int pid = GetPid(h);
+        string? path = GetProcessPath(pid);
+        if (path == null) return null;
+
+        if (string.Equals(Path.GetFileName(path), StoreHostExe, StringComparison.OrdinalIgnoreCase))
+        {
+            // Store app: the frame belongs to ApplicationFrameHost; the app itself owns a child window.
+            int childPid = 0;
+            Native.EnumChildWindows(h, (c, _) =>
+            {
+                int p = GetPid(c);
+                if (p != pid) { childPid = p; return false; }
+                return true;
+            }, IntPtr.Zero);
+            string? storeId = childPid == 0 ? null : GetAppUserModelId(childPid);
+            return storeId == null ? null : "aumid:" + storeId;
+        }
+
+        string? id = GetAppUserModelId(pid); // packaged desktop apps (new Notepad, Paint, Terminal…)
+        if (id != null) return "aumid:" + id;
+
+        // Some apps show their windows from a sub-process (Steam's web helper, Java, embedded browsers):
+        // starting that sub-process on its own doesn't start the app, so use the program that launched it.
+        if (HostExes.Contains(Path.GetFileName(path)) && ParentProcessPath(pid) is string parent
+            && !HostExes.Contains(Path.GetFileName(parent))
+            && !string.Equals(Path.GetFileName(parent), "explorer.exe", StringComparison.OrdinalIgnoreCase))
+            return "exe:" + parent;
+        return "exe:" + path;
+    }
+
+    private static readonly HashSet<string> HostExes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "steamwebhelper.exe", "msedgewebview2.exe", "javaw.exe", "java.exe", "rundll32.exe", "dllhost.exe",
+        "cefsharp.browsersubprocess.exe", "qtwebengineprocess.exe", "electron.exe",
+    };
+
+    /// <summary>Full path of the process that started <paramref name="pid"/> (if it's still running).</summary>
+    private static string? ParentProcessPath(int pid)
+    {
+        IntPtr snap = Native.CreateToolhelp32Snapshot(Native.TH32CS_SNAPPROCESS, 0);
+        if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return null;
+        try
+        {
+            var e = new Native.PROCESSENTRY32 { dwSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<Native.PROCESSENTRY32>() };
+            if (!Native.Process32First(snap, ref e)) return null;
+            do
+            {
+                if (e.th32ProcessID == (uint)pid)
+                    return e.th32ParentProcessID == 0 ? null : GetProcessPath((int)e.th32ParentProcessID);
+            } while (Native.Process32Next(snap, ref e));
+            return null;
+        }
+        finally { Native.CloseHandle(snap); }
+    }
+
+    private static string? GetAppUserModelId(int pid)
+    {
+        IntPtr hp = Native.OpenProcess(Native.PROCESS_QUERY_LIMITED_INFORMATION, false, (uint)pid);
+        if (hp == IntPtr.Zero) return null;
+        try
+        {
+            uint len = 256;
+            var sb = new StringBuilder((int)len);
+            return Native.GetApplicationUserModelId(hp, ref len, sb) == 0 && sb.Length > 0 ? sb.ToString() : null;
+        }
+        finally { Native.CloseHandle(hp); }
     }
 
     public static bool IsCloaked(IntPtr h)

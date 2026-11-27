@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading;
 using Microsoft.Win32;
 
 namespace MonitorWindowControl;
@@ -14,6 +16,15 @@ public static class Paths
     public static string SettingsFile => Path.Combine(Dir, "settings.json");
     public static string LogFile => Path.Combine(Dir, "monitorwindowcontrol.log");
     public static string LegacyIni => Path.Combine(AppContext.BaseDirectory, "WindowHome.ini");
+
+    /// <summary>Where the tiny helper is unpacked to (not a folder Windows' "Controlled folder access" protects).</summary>
+    public static string HelperDir { get; } =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MonitorWindowControl");
+    public static string HelperExe => Path.Combine(HelperDir, "MonitorWindowControlHelper.exe");
+
+    /// <summary>Start menu folder for launch-only shortcuts.</summary>
+    public static string ShortcutsDir =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Monitor Window Control");
 
     /// <summary>Settings folder used before the app was renamed from "WindowHome".</summary>
     public static string OldDir =>
@@ -55,6 +66,10 @@ public sealed class AppRule
     /// </summary>
     public bool FollowLastUsed { get; set; }
     public List<MonitorRef> AllowedMonitors { get; set; } = new();
+    /// <summary>How to start the app for launch-only shortcuts: "exe:C:\...\app.exe" or "aumid:Package!App". Null = unknown yet.</summary>
+    public string? LaunchTarget { get; set; }
+    /// <summary>File name (without .lnk) of this app's launch shortcut, fixed when it was created. Null = none made.</summary>
+    public string? ShortcutFile { get; set; }
     public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
 }
 
@@ -80,6 +95,10 @@ public sealed class AppSettings
     public bool LearnAutomatically { get; set; } = true;
     /// <summary>true = apps it hasn't learned yet open on the main monitor; false = leave them.</summary>
     public bool MoveUnknownToMain { get; set; } = true;
+    /// <summary>How it runs in the background: see <see cref="RunModes"/>.</summary>
+    public string RunMode { get; set; } = RunModes.Tray;
+    /// <summary>Start with Windows (null = not decided yet; older versions kept this only in the registry).</summary>
+    public bool? StartWithWindows { get; set; }
     public List<AppRule> Apps { get; set; } = new();
     /// <summary>Your own names for monitors ("1 · Main", "TV"…).</summary>
     public List<MonitorNickname> MonitorNicknames { get; set; } = new();
@@ -88,30 +107,101 @@ public sealed class AppSettings
         Apps.FirstOrDefault(a => string.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase));
 }
 
+/// <summary>Compile-time JSON code, so settings also load in the tiny native helper (no reflection there).</summary>
+[JsonSourceGenerationOptions(WriteIndented = true)]
+[JsonSerializable(typeof(AppSettings))]
+internal partial class SettingsJson : JsonSerializerContext { }
+
+/// <summary>
+/// settings.json is shared by the settings window and the helper, which may run at the same time.
+/// Writes are atomic (temp file + rename); reads retry briefly if the other process is mid-write,
+/// and a file that is only temporarily unreadable never resets your settings.
+/// </summary>
 public static class SettingsStore
 {
-    private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
+    private const string LockName = @"Local\MonitorWindowControl.Settings";
+    private static DateTime _loadedStampUtc;
+
+    /// <summary>
+    /// Cross-process lock for "re-read, change, save", so the settings window and the helper never overwrite
+    /// each other's changes. Hold it around the whole change (it's re-entrant on the same thread).
+    /// </summary>
+    public static IDisposable Lock() => new SettingsLock();
+
+    private sealed class SettingsLock : IDisposable
+    {
+        private readonly Mutex _m = new(false, LockName);
+        private readonly bool _held;
+        public SettingsLock()
+        {
+            try { _held = _m.WaitOne(3000); }
+            catch (AbandonedMutexException) { _held = true; } // the other process died holding it: it's ours now
+        }
+        public void Dispose()
+        {
+            if (_held) try { _m.ReleaseMutex(); } catch { }
+            _m.Dispose();
+        }
+    }
 
     public static AppSettings Load(out bool existed)
     {
         existed = File.Exists(Paths.SettingsFile);
         if (!existed) return new AppSettings();
-        try
+        var (settings, error) = ReadWithRetry();
+        if (settings != null) return settings;
+
+        // Really unreadable (not just busy): keep a copy so nothing is lost, start fresh.
+        string bad = Paths.SettingsFile + ".broken";
+        try { File.Copy(Paths.SettingsFile, bad, true); } catch { }
+        Log.Write($"settings.json could not be read ({error}). A copy was saved as {bad}; starting fresh.");
+        return new AppSettings();
+    }
+
+    /// <summary>True if settings.json was changed (by any process) since this process last read or wrote it.</summary>
+    public static bool ChangedOnDisk()
+    {
+        try { return File.Exists(Paths.SettingsFile) && File.GetLastWriteTimeUtc(Paths.SettingsFile) != _loadedStampUtc; }
+        catch { return false; }
+    }
+
+    /// <summary>Re-reads settings after another process changed them; null if it can't be read right now (try again later).</summary>
+    public static AppSettings? TryReload() => ReadWithRetry().settings;
+
+    private static (AppSettings? settings, string? error) ReadWithRetry()
+    {
+        string? error = null;
+        DateTime stamp = default;
+        for (int attempt = 0; attempt < 5; attempt++)
         {
-            var s = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(Paths.SettingsFile), Options) ?? new AppSettings();
-            s.Apps ??= new List<AppRule>();
-            s.Apps.RemoveAll(a => string.IsNullOrWhiteSpace(a.Key));
-            foreach (var a in s.Apps) a.AllowedMonitors ??= new();
-            s.MonitorNicknames ??= new();
-            return s;
+            if (attempt > 0) Thread.Sleep(60);
+            try
+            {
+                stamp = File.GetLastWriteTimeUtc(Paths.SettingsFile);
+                string json = File.ReadAllText(Paths.SettingsFile);
+                var s = JsonSerializer.Deserialize(json, SettingsJson.Default.AppSettings) ?? new AppSettings();
+                s.Apps ??= new List<AppRule>();
+                s.Apps.RemoveAll(a => string.IsNullOrWhiteSpace(a.Key));
+                foreach (var a in s.Apps) a.AllowedMonitors ??= new();
+                s.MonitorNicknames ??= new();
+                s.RunMode = RunModes.Normalize(s.RunMode);
+                _loadedStampUtc = stamp;
+                return (s, null);
+            }
+            catch (IOException ex) { error = ex.Message; }                 // being written by the other process
+            catch (UnauthorizedAccessException ex) { error = ex.Message; }
+            catch (JsonException ex)
+            {
+                error = ex.Message;
+                if (attempt >= 1)
+                {
+                    // Really broken, not just mid-write: don't re-try on every check until the file changes again.
+                    _loadedStampUtc = stamp;
+                    break;
+                }
+            }
         }
-        catch (Exception ex)
-        {
-            string bad = Paths.SettingsFile + ".broken";
-            try { File.Copy(Paths.SettingsFile, bad, true); } catch { }
-            Log.Write($"settings.json could not be read ({ex.Message}). A copy was saved as {bad}; starting fresh.");
-            return new AppSettings();
-        }
+        return (null, error);
     }
 
     public static void Save(AppSettings s)
@@ -119,9 +209,17 @@ public static class SettingsStore
         try
         {
             Directory.CreateDirectory(Paths.Dir);
-            string tmp = Paths.SettingsFile + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(s, Options));
-            File.Move(tmp, Paths.SettingsFile, true);
+            string tmp = Paths.SettingsFile + "." + Environment.ProcessId + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(s, SettingsJson.Default.AppSettings));
+            // A rename keeps the file's time stamp: remember ours, so a later write by the other process is noticed.
+            var myStamp = File.GetLastWriteTimeUtc(tmp);
+            for (int attempt = 0; ; attempt++)
+            {
+                try { File.Move(tmp, Paths.SettingsFile, true); break; }
+                catch (IOException) when (attempt < 5) { Thread.Sleep(60); }
+                catch (UnauthorizedAccessException) when (attempt < 5) { Thread.Sleep(60); }
+            }
+            _loadedStampUtc = myStamp;
         }
         catch (Exception ex)
         {
@@ -130,7 +228,7 @@ public static class SettingsStore
     }
 }
 
-/// <summary>Rolling text log, capped at about 1 MB.</summary>
+/// <summary>Rolling text log, capped at about 1 MB. Shared by the settings window and the helper.</summary>
 public static class Log
 {
     private const long MaxBytes = 1_000_000;
@@ -138,22 +236,28 @@ public static class Log
 
     public static void Write(string message)
     {
-        try
+        lock (Gate)
         {
-            lock (Gate)
+            string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {message}{Environment.NewLine}";
+            for (int attempt = 0; attempt < 4; attempt++)
             {
-                Directory.CreateDirectory(Paths.Dir);
-                var fi = new FileInfo(Paths.LogFile);
-                if (fi.Exists && fi.Length > MaxBytes)
+                try
                 {
-                    var lines = File.ReadAllLines(Paths.LogFile);
-                    var keep = lines.Skip(lines.Length / 2);
-                    File.WriteAllLines(Paths.LogFile, new[] { "---- older entries removed to keep the log small ----" }.Concat(keep));
+                    Directory.CreateDirectory(Paths.Dir);
+                    var fi = new FileInfo(Paths.LogFile);
+                    if (fi.Exists && fi.Length > MaxBytes)
+                    {
+                        var lines = File.ReadAllLines(Paths.LogFile);
+                        var keep = lines.Skip(lines.Length / 2);
+                        File.WriteAllLines(Paths.LogFile, new[] { "---- older entries removed to keep the log small ----" }.Concat(keep));
+                    }
+                    File.AppendAllText(Paths.LogFile, line);
+                    return;
                 }
-                File.AppendAllText(Paths.LogFile, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {message}{Environment.NewLine}");
+                catch (IOException) { Thread.Sleep(25); } // the other process is writing a line
+                catch { return; }                         // logging must never crash the app
             }
         }
-        catch { /* logging must never crash the app */ }
     }
 }
 
@@ -163,37 +267,40 @@ public static class StartupManager
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string ValueName = "MonitorWindowControl";
 
-    private static string Command => $"\"{Environment.ProcessPath}\" --tray";
-
     public static bool IsEnabled()
     {
         using var k = Registry.CurrentUser.OpenSubKey(RunKey);
         return k?.GetValue(ValueName) is string;
     }
 
-    public static void Set(bool enabled)
+    /// <summary>
+    /// Points the Run entry at the right program for the mode: the settings app in the tray, the tiny helper,
+    /// or nothing at all in launch-only mode (nothing should start in the background then).
+    /// </summary>
+    public static void Apply(string mode, bool enabled, string appExe, string helperExe)
     {
-        using var k = Registry.CurrentUser.CreateSubKey(RunKey);
-        if (enabled) k.SetValue(ValueName, Command);
-        else k.DeleteValue(ValueName, false);
+        try
+        {
+            using var k = Registry.CurrentUser.CreateSubKey(RunKey);
+            string? command = !enabled ? null
+                : mode == RunModes.Helper ? $"\"{helperExe}\""
+                : mode == RunModes.LaunchOnly ? null
+                : $"\"{appExe}\" --tray";
+            if (command == null) k.DeleteValue(ValueName, false);
+            else if (k.GetValue(ValueName) as string != command) k.SetValue(ValueName, command);
+        }
+        catch (Exception ex) { Log.Write("Could not update Start with Windows: " + ex.Message); }
     }
 
-    /// <summary>If the exe was moved or renamed, point the Run entry at the new location.</summary>
-    public static void RefreshPathIfEnabled()
+    /// <summary>Removes the autostart entry of the app's old name ("WindowHome.exe --tray"), only that exact kind.</summary>
+    public static void RemoveOldNameEntry()
     {
         try
         {
             using var k = Registry.CurrentUser.OpenSubKey(RunKey, true);
-            if (k == null) return;
-            // Entry written by this app under its old name ("WindowHome.exe --tray"): replace it with the new one.
-            // (Only that exact kind of entry, so an old AutoHotkey autostart is never touched.)
-            if (k.GetValue("WindowHome") is string old
+            if (k?.GetValue("WindowHome") is string old
                 && old.Contains("WindowHome.exe", StringComparison.OrdinalIgnoreCase) && old.EndsWith("--tray"))
-            {
                 k.DeleteValue("WindowHome", false);
-                k.SetValue(ValueName, Command);
-            }
-            if (k.GetValue(ValueName) is string current && current != Command) k.SetValue(ValueName, Command);
         }
         catch { }
     }
