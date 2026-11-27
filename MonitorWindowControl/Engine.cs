@@ -60,6 +60,10 @@ public sealed class Engine : IDisposable
     /// <summary>Raised when a new window of an app has been dealt with (moved, or already in place). Argument: app key.</summary>
     public event Action<string>? WindowHandled;
 
+    /// <summary>Raised when an app window appears or one seen this session closes (so a list of open apps can update).</summary>
+    public event Action? AppWindowsChanged;
+    private readonly HashSet<IntPtr> _appWindows = new();
+
     private sealed class Pending
     {
         public DateTime Due;
@@ -144,7 +148,7 @@ public sealed class Engine : IDisposable
     {
         _placeTimer.Stop(); _learnTimer.Stop();
         if (_hook != IntPtr.Zero) { Native.UnhookWinEvent(_hook); _hook = IntPtr.Zero; }
-        _pending.Clear(); _handled.Clear(); ResetStreak();
+        _pending.Clear(); _handled.Clear(); _appWindows.Clear(); ResetStreak();
         ReleaseActiveMutex();
     }
 
@@ -270,6 +274,7 @@ public sealed class Engine : IDisposable
         {
             _handled.Remove(hwnd);
             _pending.Remove(hwnd);
+            if (_appWindows.Remove(hwnd)) AppWindowsChanged?.Invoke();
             return;
         }
 
@@ -322,6 +327,7 @@ public sealed class Engine : IDisposable
         // A real app window: handle it exactly once.
         _pending.Remove(hwnd);
         _handled.Add(hwnd);
+        if (_appWindows.Add(hwnd)) AppWindowsChanged?.Invoke();
         ReloadIfChanged();
         if (!Settings.Enabled) return;
 

@@ -51,7 +51,21 @@ public partial class MainWindow : FluentWindow
             BackgroundStatusText.Text = _app.BackgroundStatus();
         };
         _openAppsTimer.Start();
+        // In tray mode the engine sees app windows open and close: update the list right away (debounced).
+        _appsChangedDebounce = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+        _appsChangedDebounce.Tick += (_, _) => { _appsChangedDebounce.Stop(); RefreshAppList(background: true); };
+        _engine.AppWindowsChanged += OnAppWindowsChanged;
         Refresh();
+    }
+
+    private readonly System.Windows.Threading.DispatcherTimer _appsChangedDebounce;
+
+    private void OnAppWindowsChanged() { _appsChangedDebounce.Stop(); _appsChangedDebounce.Start(); }
+
+    private void RefreshApps_Click(object sender, RoutedEventArgs e)
+    {
+        _engine.ReloadIfChanged();
+        RefreshAppList(background: false);
     }
 
     private string _monitorSig = "";
@@ -60,7 +74,9 @@ public partial class MainWindow : FluentWindow
     public void Detach()
     {
         _engine.Changed -= Refresh;
+        _engine.AppWindowsChanged -= OnAppWindowsChanged;
         _openAppsTimer.Stop();
+        _appsChangedDebounce.Stop();
     }
 
     // Closing the window really closes it (frees its memory); the app keeps running in the tray.

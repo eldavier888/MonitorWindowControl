@@ -129,7 +129,14 @@
                 </ItemsControl>
 
                 <!-- Learned apps -->
-                <TextBlock Style="{StaticResource SectionHeader}" Text="Apps and where they open" />
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <TextBlock Style="{StaticResource SectionHeader}" Text="Apps and where they open" />
+                    <ui:Button Grid.Column="1" Content="Refresh" VerticalAlignment="Bottom" Margin="0,0,0,6"
+                               Click="RefreshApps_Click" ToolTip="Update the list of open apps now">
+                        <ui:Button.Icon><ui:SymbolIcon Symbol="ArrowClockwise24" /></ui:Button.Icon>
+                    </ui:Button>
+                </Grid>
                 <ui:Card Padding="0">
                     <Grid>
                         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
