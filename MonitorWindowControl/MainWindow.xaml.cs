@@ -20,10 +20,13 @@ public sealed class HideWhenTrueConverter : System.Windows.Data.IValueConverter
 }
 
 /// <summary>One row: a saved app (learned / set by you), or an app that's open right now but not saved yet.</summary>
-public sealed record AppRow(string Key, string Name, string Detail, string OpensOn, string Source, string? CurrentDevice)
+public sealed record AppRow(string Key, string Name, string Detail, string OpensOn, string Source, string? CurrentDevice, string? Hint = null)
 {
+    /// <summary>Show the tip icon (an app that keeps moving itself back).</summary>
+    public bool HasHint => Hint != null;
+
     /// <summary>What Narrator and other screen readers say for the row.</summary>
-    public override string ToString() => $"{Name}, opens on {OpensOn}, {Source}";
+    public override string ToString() => $"{Name}, opens on {OpensOn}, {Source}" + (Hint == null ? "" : $". {Hint}");
 }
 
 /// <summary>
@@ -39,6 +42,8 @@ public partial class MainWindow : FluentWindow
 {
     private const string NeverMoveLabel = "Never move this app";
     private const string LastUsedLabel = "Where I used it last…";
+    private const string MouseLabel = "The monitor I'm using (mouse pointer)…";
+    private const string StubbornTip = "It moved itself back twice after it was moved: try a longer wait (select it, then Advanced).";
     private readonly Engine _engine;
     private readonly App _app;
     private readonly System.Windows.Threading.DispatcherTimer _openAppsTimer;
@@ -62,6 +67,8 @@ public partial class MainWindow : FluentWindow
             {
                 if (!_engine.ReloadIfChanged()) RefreshAppList(background: true); // a reload refreshes everything itself
                 BackgroundStatusText.Text = _app.BackgroundStatus();
+                UpdatePauseInfo(); // (in helper mode, a game starting or ending is only seen here)
+                UpdateNavStatus();
             }
             catch (Exception ex) { Log.Write("Unexpected error (window refresh): " + ex); }
         };
@@ -78,7 +85,8 @@ public partial class MainWindow : FluentWindow
         PageScroller.SizeChanged += (_, _) => FitAppsList();
         // A closed drop-down must never change its value when you scroll the page over it (WPF does that by default
         // for a focused ComboBox — scrolling past "How it runs" could switch the mode).
-        foreach (var combo in new[] { RunModeCombo, UnknownCombo, RemoteCombo, FallbackCombo, ReturnCombo, TargetCombo, AppFallbackCombo })
+        foreach (var combo in new[] { RunModeCombo, UnknownCombo, RemoteCombo, FallbackCombo, ReturnCombo, TargetCombo, AppFallbackCombo,
+                                      PlaceCombo, WaitCombo, CorrectCombo })
             combo.PreviewMouseWheel += Combo_PreviewMouseWheel;
         PreviewKeyDown += (_, _) => _lastKeyTick = Environment.TickCount;
         Loaded += (_, _) => PageScroller.ScrollToTop();
@@ -213,8 +221,9 @@ public partial class MainWindow : FluentWindow
             EnabledToggle.IsChecked = s.Enabled;
             LearnToggle.IsChecked = s.LearnAutomatically;
             StartupToggle.IsChecked = s.StartWithWindows == true;
-            UnknownCombo.SelectedIndex = s.MoveUnknownToMain ? 0 : 1;
+            UnknownCombo.SelectedIndex = s.UnknownFollowMouse ? 2 : s.MoveUnknownToMain ? 0 : 1;
             RemoteCombo.SelectedIndex = s.PauseDuringRemoteDesktop ? 0 : 1;
+            GameToggle.IsChecked = s.PauseForGames;
             UpdatePauseInfo();
 
             RunModeCombo.SelectedItem = RunModeCombo.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == s.RunMode);
@@ -230,18 +239,26 @@ public partial class MainWindow : FluentWindow
             BackgroundStatusText.Text = _app.BackgroundStatus();
             StartupToggle.IsEnabled = !launchOnly;
             ExitCard.Visibility = s.RunMode == RunModes.Tray ? Visibility.Visible : Visibility.Collapsed;
-            NavStatus.Text = !s.Enabled ? "Paused" : _engine.IsPausedForRemoteDesktop ? "Paused during Remote Desktop" : s.RunMode switch
-            {
-                RunModes.Helper => "Running as a background helper",
-                RunModes.LaunchOnly => "Launch shortcuts only",
-                _ => "Running in the tray",
-            };
+            UpdateNavStatus();
             StartupHint.Text = s.RunMode switch
             {
                 RunModes.Helper => "Starts the tiny helper when you sign in (no window, no tray icon).",
                 RunModes.LaunchOnly => "Not needed: nothing has to run in the background.",
                 _ => "Runs quietly in the tray when you sign in.",
             };
+            SignInToggle.IsChecked = s.PlaceAppsOpenedAtSignIn;
+            SignInToggle.IsEnabled = !launchOnly && s.StartWithWindows == true;
+            SignInHint.Text = launchOnly
+                ? "Needs something running in the background, started with Windows."
+                : s.StartWithWindows != true
+                    ? "Works with Start with Windows: turn that on first."
+                    : "Apps that start with Windows, like a chat or music app, often open before Monitor Window Control does. Right after you sign in, " +
+                      "their windows are moved to their monitors too. Windows you've already started using are left alone.";
+            DialogsToggle.IsChecked = s.MoveDialogsWithApp;
+            DialogsToggle.IsEnabled = !launchOnly;
+            DialogsHint.Text = launchOnly
+                ? "Needs something running in the background to notice dialogs opening."
+                : "Save, Print and other small windows that open on another monitor than their app move over the app's window. They're never resized.";
             LearnToggle.IsEnabled = !launchOnly;
             LearnHint.Text = launchOnly
                 ? "Needs something running in the background to notice where you use apps; set apps' monitors on the Apps page instead."
@@ -279,6 +296,7 @@ public partial class MainWindow : FluentWindow
     private void RefreshAppList(bool background)
     {
         if (background && (TargetCombo.IsDropDownOpen || UnknownCombo.IsDropDownOpen || AppFallbackCombo.IsDropDownOpen
+                           || PlaceCombo.IsDropDownOpen || WaitCombo.IsDropDownOpen || CorrectCombo.IsDropDownOpen
                            || System.Windows.Input.Mouse.LeftButton == System.Windows.Input.MouseButtonState.Pressed))
             return;
         _updating = true;
@@ -331,6 +349,12 @@ public partial class MainWindow : FluentWindow
     {
         string opensOn;
         if (r.NeverMove) opensOn = "Never moved";
+        else if (r.FollowMouse)
+        {
+            int n = r.AllowedMonitors.Count;
+            opensOn = "The monitor you're using";
+            if (n > 0 && n < _engine.Monitors.Count) opensOn += $", {n} allowed";
+        }
         else if (r.FollowLastUsed)
         {
             var m = _engine.ResolveTarget(r);
@@ -345,8 +369,10 @@ public partial class MainWindow : FluentWindow
                 : m.IsSwitchedOff ? $"{m.Label} (switched off)" : m.Label;
         }
         var (name, detail) = Names(r.Key, r.DisplayName);
+        if (!r.NeverMove && r.Place == PlaceModes.Maximized) opensOn += ", maximized";
+        else if (!r.NeverMove && r.Place == PlaceModes.Last) opensOn += ", where you had it";
         return new AppRow(r.Key, name, detail, opensOn, r.Pinned || r.NeverMove ? "Set by you" : "Learned",
-                          open?.Monitor?.DeviceName);
+                          open?.Monitor?.DeviceName, r.MovedItselfBack && !r.NeverMove ? StubbornTip : null);
     }
 
     private AppRow ToRow(Engine.OpenApp o)
@@ -370,23 +396,34 @@ public partial class MainWindow : FluentWindow
         // Don't reset what the user is picking unless the selection or that app's setting changed.
         var s = _engine.Settings;
         string state = row == null ? "" :
-            $"{row.Key}|{rule?.NeverMove}|{rule?.FollowLastUsed}|{rule?.MonitorDevice}|" +
+            $"{row.Key}|{rule?.NeverMove}|{rule?.FollowLastUsed}|{rule?.FollowMouse}|{rule?.MonitorDevice}|" +
             string.Join(",", rule?.AllowedMonitors.Select(a => a.Device) ?? Enumerable.Empty<string>()) + "|" +
             $"{rule?.Fallback}|{rule?.FallbackMonitor?.Device}|{s.Fallback}|{s.FallbackMonitor?.Device}|" +
+            $"{rule?.Place}|{rule?.Positions.Count}|{rule?.WaitMs}|{rule?.CorrectForMs}|{rule?.MovedItselfBack}|" +
             string.Join(",", _engine.Monitors.Select(m => m.DeviceName + "=" + m.Label));
         if (row?.Key == _panelKey && state == _panelState) return;
         _panelKey = row?.Key; _panelState = state;
 
-        var items = new List<object>(_engine.Monitors) { LastUsedLabel, NeverMoveLabel };
+        var items = new List<object>(_engine.Monitors) { LastUsedLabel, MouseLabel, NeverMoveLabel };
         TargetCombo.ItemsSource = items;
 
-        // "Where I used it last": ticked = monitors it may open on, in its order (then the others). All are ticked
-        // when it isn't set yet, except monitors kept for chosen apps.
-        var ordered = rule is { FollowLastUsed: true } ? _engine.AllowedInOrder(rule) : new List<MonitorInfo>();
+        // "Where I used it last" and "The monitor I'm using": ticked = monitors it may open on, in its order (then the
+        // others). All are ticked when it isn't set yet, except monitors kept for chosen apps.
+        bool hasList = rule is { FollowLastUsed: true } || rule is { FollowMouse: true };
+        var ordered = hasList ? _engine.AllowedInOrder(rule!) : new List<MonitorInfo>();
         _allowedItems = ordered.Concat(_engine.Monitors.Where(m => !ordered.Any(o => o.DeviceName == m.DeviceName)))
-            .Select(m => new AllowedItem(m, rule is { FollowLastUsed: true } ? _engine.IsAllowed(rule, m) : !m.OnlyChosenApps))
+            .Select(m => new AllowedItem(m, hasList ? _engine.IsAllowed(rule!, m) : !m.OnlyChosenApps))
             .ToList();
         BuildAllowedRows();
+
+        // "Place it" and Advanced.
+        PlaceCombo.SelectedIndex = rule?.Place switch { PlaceModes.Last => 1, PlaceModes.Maximized => 2, _ => 0 };
+        WaitCombo.SelectedIndex = rule?.WaitMs switch { 1000 => 1, 3000 => 2, _ => 0 };
+        CorrectCombo.SelectedIndex = rule?.CorrectForMs == 5000 ? 1 : 0;
+        bool tip = rule is { MovedItselfBack: true, NeverMove: false };
+        AdvancedTip.Visibility = tip ? Visibility.Visible : Visibility.Collapsed;
+        AdvancedExpander.IsExpanded = tip || rule?.WaitMs != null || rule?.CorrectForMs != null;
+        UpdatePlaceNote(rule);
 
         // "If it's off, open on".
         var fallbacks = FallbackItems(forApp: true, rule?.Fallback, rule?.FallbackMonitor, out var chosen);
@@ -397,6 +434,7 @@ public partial class MainWindow : FluentWindow
         else if (rule != null)
             TargetCombo.SelectedItem = rule.NeverMove ? NeverMoveLabel
                 : rule.FollowLastUsed ? LastUsedLabel
+                : rule.FollowMouse ? MouseLabel
                 : (object?)_engine.Resolve(rule) ?? _engine.MainMonitor;
         else // not saved yet: start from the monitor it's on now
             TargetCombo.SelectedItem = _engine.Monitors.FirstOrDefault(m => m.DeviceName == row.CurrentDevice) ?? _engine.MainMonitor;
@@ -405,10 +443,53 @@ public partial class MainWindow : FluentWindow
 
     private void UpdateAllowedPanel()
     {
-        AllowedPanel.Visibility = TargetCombo.SelectedItem as string == LastUsedLabel ? Visibility.Visible : Visibility.Collapsed;
-        LastUsedLaunchOnlyNote.Visibility = _engine.Settings.RunMode == RunModes.LaunchOnly ? Visibility.Visible : Visibility.Collapsed;
-        AppFallbackPanel.Visibility = TargetCombo.SelectedItem == null || TargetCombo.SelectedItem as string == NeverMoveLabel
-            ? Visibility.Collapsed : Visibility.Visible;
+        string? choice = TargetCombo.SelectedItem as string;
+        AllowedPanel.Visibility = choice is LastUsedLabel or MouseLabel ? Visibility.Visible : Visibility.Collapsed;
+        AllowedIntro.Text = choice == MouseLabel
+            ? "It opens on the monitor with the mouse pointer (or, if you use only the keyboard, the monitor of the window you're using), " +
+              "but only on the monitors ticked here. Otherwise it opens on the first ticked monitor in this order:"
+            : "It opens on whichever of these monitors you used it on last. If that one is off, it opens on the next one in this order:";
+        LastUsedLaunchOnlyNote.Visibility = choice == LastUsedLabel && _engine.Settings.RunMode == RunModes.LaunchOnly
+            ? Visibility.Visible : Visibility.Collapsed;
+        var moves = TargetCombo.SelectedItem == null || choice == NeverMoveLabel ? Visibility.Collapsed : Visibility.Visible;
+        AppFallbackPanel.Visibility = moves;
+        PlacePanel.Visibility = moves;
+        AdvancedExpander.Visibility = moves;
+    }
+
+    /// <summary>The line under "Place it" for "Where I last had it": on how many monitors it's known, with Reset.</summary>
+    private void UpdatePlaceNote(AppRule? rule)
+    {
+        bool last = PlaceCombo.SelectedIndex == 1;
+        PlaceLastPanel.Visibility = last ? Visibility.Visible : Visibility.Collapsed;
+        int known = rule?.Positions.Count ?? 0;
+        bool launchOnly = _engine.Settings.RunMode == RunModes.LaunchOnly;
+        PlaceLastNote.Text = launchOnly && known == 0
+            ? "Needs something running in the background to notice where you have it. Until then it opens in the center."
+            : known == 0 ? "Remembered for each monitor as you use it. Until then it opens in the center."
+            : known == 1 ? "Remembered on 1 monitor. On others it opens in the center until you've used it there."
+            : $"Remembered on {known} monitors.";
+        ResetPlaceButton.Visibility = known > 0 && rule?.Place == PlaceModes.Last ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void PlaceCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (PlaceLastPanel == null || ResetPlaceButton == null) return; // (still loading the window)
+        var row = AppsList.SelectedItem as AppRow;
+        UpdatePlaceNote(row == null ? null : _engine.Settings.Find(row.Key));
+    }
+
+    private async void ResetPlace_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppsList.SelectedItem is not AppRow row || _engine.Settings.Find(row.Key) is not AppRule rule) return;
+        var box = new Wpf.Ui.Controls.MessageBox
+        {
+            Title = $"Forget where {row.Name} was?",
+            Content = "Where its window was on each monitor is forgotten. It opens in the center until you've used it on a monitor again.",
+            PrimaryButtonText = "Forget", CloseButtonText = "Cancel",
+        };
+        if (await box.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
+        _engine.ResetPositions(rule.Key);
     }
 
     /// <summary>One monitor in the "Where I used it last" list: ticked or not, in the order shown.</summary>
@@ -669,13 +750,33 @@ public partial class MainWindow : FluentWindow
     private void UnknownCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_updating || UnknownCombo.SelectedIndex < 0) return;
-        _engine.SetMoveUnknownToMain(UnknownCombo.SelectedIndex == 0);
+        _engine.SetUnknownApps(UnknownCombo.SelectedIndex == 0, followMouse: UnknownCombo.SelectedIndex == 2);
     }
+
+    private void DialogsToggle_Click(object sender, RoutedEventArgs e) => _engine.SetMoveDialogsWithApp(DialogsToggle.IsChecked == true);
+
+    private void GameToggle_Click(object sender, RoutedEventArgs e) => _engine.SetPauseForGames(GameToggle.IsChecked == true);
+
+    private void SignInToggle_Click(object sender, RoutedEventArgs e) => _engine.SetPlaceAppsOpenedAtSignIn(SignInToggle.IsChecked == true);
 
     private void RemoteCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_updating || RemoteCombo.SelectedIndex < 0) return;
         _engine.SetPauseDuringRemoteDesktop(RemoteCombo.SelectedIndex == 0);
+    }
+
+    /// <summary>The status line under the app's name in the navigation pane.</summary>
+    private void UpdateNavStatus()
+    {
+        var s = _engine.Settings;
+        string text = !s.Enabled ? "Paused" : _engine.IsPausedForRemoteDesktop ? "Paused during Remote Desktop"
+            : s.RunMode != RunModes.LaunchOnly && _engine.IsPausedForGame ? "Paused while a game is running" : s.RunMode switch
+            {
+                RunModes.Helper => "Running as a background helper",
+                RunModes.LaunchOnly => "Launch shortcuts only",
+                _ => "Running in the tray",
+            };
+        if (NavStatus.Text != text) NavStatus.Text = text;
     }
 
     /// <summary>The bar at the top of General: says when something outside the app pauses it.</summary>
@@ -689,6 +790,11 @@ public partial class MainWindow : FluentWindow
                 ? "Windows aren't moved and nothing is learned until you're back on this PC's own monitors."
                 : "Windows are still moved, as you chose, but nothing is learned until you're back on this PC's own monitors.";
         }
+        else if (_engine.IsPausedForGame && _engine.Settings.Enabled && _engine.Settings.RunMode != RunModes.LaunchOnly)
+        {
+            title = "Paused: a game or presentation is running";
+            message = "Windows aren't moved and nothing is learned until it ends. Windows that open meanwhile are placed then.";
+        }
         else if (_engine.HasDuplicatedMonitors)
         {
             title = "Learning paused: monitors are duplicated";
@@ -700,6 +806,7 @@ public partial class MainWindow : FluentWindow
             message = "New windows open on another monitor until you change it on the Monitors page" +
                       (_engine.Settings.RunMode == RunModes.Tray ? " or under Monitors in the tray icon's menu." : ".");
         }
+        if (PauseInfoBar.Title == title && PauseInfoBar.Message == message && PauseInfoBar.IsOpen == title.Length > 0) return;
         PauseInfoBar.Title = title;
         PauseInfoBar.Message = message;
         PauseInfoBar.IsOpen = title.Length > 0;
@@ -718,21 +825,33 @@ public partial class MainWindow : FluentWindow
         // Read every choice first: saving the first one refreshes this panel.
         var fallback = AppFallbackCombo.SelectedItem as FallbackItem;
         var allowed = _allowedItems.Where(a => a.Checked).Select(a => a.Monitor).ToList(); // in the order shown
-        switch (TargetCombo.SelectedItem)
+        string? place = PlaceCombo.SelectedIndex switch { 1 => PlaceModes.Last, 2 => PlaceModes.Maximized, _ => null };
+        int? wait = WaitCombo.SelectedIndex switch { 1 => 1000, 2 => 3000, _ => null };
+        int? correct = CorrectCombo.SelectedIndex == 1 ? 5000 : null;
+        object? choice = TargetCombo.SelectedItem;
+        bool never = choice as string == NeverMoveLabel;
+        // Nothing ticked = any monitor, except monitors kept for chosen apps (ticking one is choosing it).
+        if (allowed.Count == 0) allowed = _allowedItems.Select(a => a.Monitor).Where(m => !m.OnlyChosenApps).ToList();
+        if (allowed.Count == 0) allowed = _allowedItems.Select(a => a.Monitor).ToList();
+        // An app saved already gets "Place it" first, so its open windows are placed that way when they move.
+        bool saved = _engine.Settings.Find(row.Key) != null;
+        if (saved && !never) _engine.SetAppPlacement(row.Key, place, wait, correct);
+        switch (choice)
         {
             case MonitorInfo m: _engine.Pin(row.Key, m, row.Name); break;
             case string s when s == NeverMoveLabel: _engine.Pin(row.Key, null, row.Name); break;
             case string s when s == LastUsedLabel:
-                // Nothing ticked = any monitor, except monitors kept for chosen apps (ticking one is choosing it).
-                if (allowed.Count == 0) allowed = _allowedItems.Select(a => a.Monitor).Where(m => !m.OnlyChosenApps).ToList();
-                if (allowed.Count == 0) allowed = _allowedItems.Select(a => a.Monitor).ToList();
                 var now = _engine.Monitors.FirstOrDefault(m => m.DeviceName == row.CurrentDevice);
                 _engine.SetFollowLastUsed(row.Key, allowed, now, row.Name);
                 break;
+            case string s when s == MouseLabel:
+                _engine.SetFollowMouse(row.Key, allowed, row.Name);
+                break;
             default: return;
         }
-        if (TargetCombo.SelectedItem as string != NeverMoveLabel && fallback is { KeepSaved: false })
+        if (!never && fallback is { KeepSaved: false })
             _engine.SetAppFallback(row.Key, fallback.Mode, fallback.Monitor);
+        if (!saved && !never) _engine.SetAppPlacement(row.Key, place, wait, correct);
         Activate(); // moving a maximized window can bring it to the front; stay on top for the next choice
     }
 

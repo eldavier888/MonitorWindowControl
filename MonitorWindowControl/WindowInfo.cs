@@ -19,9 +19,20 @@ internal static class WindowInfo
         NotYet,
         /// <summary>Not visible (any more).</summary>
         Hidden,
-        /// <summary>Never an app window (tool window, owned, shell, ours…).</summary>
+        /// <summary>Never an app window (tool window, shell, ours, an owned pop-up that isn't a dialog…).</summary>
         Never,
+        /// <summary>
+        /// A dialog that belongs to an app window (Save As, Print, Settings…): it may be moved to its app's monitor,
+        /// but it never teaches anything and never counts as one of the app's own windows.
+        /// </summary>
+        OwnedDialog,
     }
+
+    /// <summary>Owned pop-ups of these classes are never dialogs (menus, tooltips, input method windows).</summary>
+    private static readonly HashSet<string> NotDialogClasses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "#32768", "tooltips_class32", "IME", "MSCTFIME UI", "SysShadow",
+    };
 
     private static readonly HashSet<string> ShellClasses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -49,14 +60,15 @@ internal static class WindowInfo
         if (!Native.IsWindow(h) || !Native.IsWindowVisible(h)) return Kind.Hidden;
         if (IsOwnProcess(GetPid(h), ownPid)) return Kind.Never;
         if (Native.GetAncestor(h, Native.GA_ROOT) != h) return Kind.Never;
-        if (Native.GetWindow(h, Native.GW_OWNER) != IntPtr.Zero) return Kind.Never;
 
         long style = Native.GetWindowLongPtr(h, Native.GWL_STYLE).ToInt64();
         long ex = Native.GetWindowLongPtr(h, Native.GWL_EXSTYLE).ToInt64();
         if ((style & Native.WS_CHILD) != 0) return Kind.Never;
         if ((ex & Native.WS_EX_TOOLWINDOW) != 0) return Kind.Never;
         if ((ex & Native.WS_EX_NOACTIVATE) != 0) return Kind.Never;
-        if (ShellClasses.Contains(GetClass(h))) return Kind.Never;
+        string cls = GetClass(h);
+        if (ShellClasses.Contains(cls)) return Kind.Never;
+        if (Native.GetWindow(h, Native.GW_OWNER) != IntPtr.Zero) return ClassifyOwned(h, style, cls);
 
         bool hasTitleBar = (style & Native.WS_CAPTION) == Native.WS_CAPTION
                            || (ex & Native.WS_EX_APPWINDOW) != 0
@@ -67,6 +79,29 @@ internal static class WindowInfo
         if (IsCloaked(h)) return Kind.NotYet;
         if (GetTitle(h).Trim().Length == 0) return Kind.NotYet;
         return Kind.AppWindow;
+    }
+
+    /// <summary>
+    /// An owned window (it belongs to another window of its app) is a dialog only if it has a title bar and isn't a
+    /// menu, tooltip or input method window. Everything else owned is never touched.
+    /// </summary>
+    private static Kind ClassifyOwned(IntPtr h, long style, string cls)
+    {
+        if ((style & Native.WS_CAPTION) != Native.WS_CAPTION) return Kind.Never;
+        if (NotDialogClasses.Contains(cls)) return Kind.Never;
+        return IsCloaked(h) ? Kind.NotYet : Kind.OwnedDialog;
+    }
+
+    /// <summary>
+    /// True for the desktop, taskbar and other parts of Windows itself: Explorer's own windows (Task View, Alt+Tab)
+    /// and the shell's full-screen surfaces (lock screen, Start, search).
+    /// </summary>
+    public static bool IsShellWindow(IntPtr h)
+    {
+        string cls = GetClass(h);
+        if (ShellClasses.Contains(cls) || cls == "Windows.UI.Core.CoreWindow") return true;
+        IntPtr shell = Native.GetShellWindow();
+        return shell != IntPtr.Zero && GetPid(shell) == GetPid(h);
     }
 
     public static AppIdentity? Identify(IntPtr h)
@@ -266,6 +301,62 @@ internal static class WindowInfo
 
     public static bool IsCloaked(IntPtr h)
         => Native.DwmGetWindowAttribute(h, Native.DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0 && cloaked != 0;
+
+    /// <summary>True when Windows hides the window because it's on another virtual desktop (DWM_CLOAKED_SHELL).</summary>
+    public static bool IsCloakedByShell(IntPtr h)
+        => Native.DwmGetWindowAttribute(h, Native.DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0
+           && (cloaked & Native.DWM_CLOAKED_SHELL) != 0;
+
+    // ------------------------------------------------------------------ virtual desktops
+
+    private static IntPtr _desktopManager;            // IVirtualDesktopManager (documented), or 0
+    private static long _desktopManagerRetryTick;     // after a failure, don't try again before this
+    private const int DesktopManagerRetryMs = 60_000;
+
+    /// <summary>
+    /// True if the window is on the virtual desktop you're looking at (or pinned to all of them), using Windows'
+    /// documented IVirtualDesktopManager. When Windows can't say, the window counts as being on this desktop.
+    /// Called on the thread that runs the engine (or the settings window), never from a window hook.
+    /// </summary>
+    public static unsafe bool IsOnCurrentDesktop(IntPtr h)
+    {
+        IntPtr vdm = DesktopManager();
+        if (vdm == IntPtr.Zero) return true;
+        void** vtbl = *(void***)vdm;
+        // IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop (vtable slot 3); a raw call also works in the native helper.
+        var isOnCurrent = (delegate* unmanaged[Stdcall]<IntPtr, IntPtr, int*, int>)vtbl[3];
+        int onCurrent = 1;
+        int hr = isOnCurrent(vdm, h, &onCurrent);
+        if (hr >= 0) return onCurrent != 0;
+        const int RPC_E_DISCONNECTED = unchecked((int)0x80010108), RPC_S_SERVER_UNAVAILABLE = unchecked((int)0x800706BA);
+        if (hr == RPC_E_DISCONNECTED || hr == RPC_S_SERVER_UNAVAILABLE) ReleaseDesktopManager(); // Explorer restarted
+        return true; // (windows Windows doesn't track, such as some pop-ups)
+    }
+
+    private static unsafe IntPtr DesktopManager()
+    {
+        if (_desktopManager != IntPtr.Zero) return _desktopManager;
+        if (Environment.TickCount64 < _desktopManagerRetryTick) return IntPtr.Zero;
+        try
+        {
+            Native.CoInitializeEx(IntPtr.Zero, Native.COINIT_APARTMENTTHREADED); // (already done on a UI thread: harmless)
+            var clsid = new Guid("aa509086-5ca9-4c25-8f95-589d3c07b48a"); // CLSID_VirtualDesktopManager
+            var iid = new Guid("a5cd92ff-29be-454c-8d04-d82879fb3f1b");   // IID_IVirtualDesktopManager
+            if (Native.CoCreateInstance(ref clsid, IntPtr.Zero, Native.CLSCTX_ALL, ref iid, out IntPtr p) == 0 && p != IntPtr.Zero)
+                return _desktopManager = p;
+        }
+        catch (Exception) { /* no virtual desktops on this Windows: every window counts as on this desktop */ }
+        _desktopManagerRetryTick = Environment.TickCount64 + DesktopManagerRetryMs;
+        return IntPtr.Zero;
+    }
+
+    private static unsafe void ReleaseDesktopManager()
+    {
+        IntPtr p = _desktopManager;
+        _desktopManager = IntPtr.Zero;
+        if (p == IntPtr.Zero) return;
+        try { ((delegate* unmanaged[Stdcall]<IntPtr, uint>)(*(void***)p)[2])(p); } catch { } // Release
+    }
 
     public static string GetTitle(IntPtr h)
     {

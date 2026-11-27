@@ -155,7 +155,26 @@
                             <ComboBox x:Name="UnknownCombo" MinWidth="250" AutomationProperties.Name="Apps it hasn't learned yet" SelectionChanged="UnknownCombo_SelectionChanged">
                                 <ComboBoxItem Content="Open on main monitor" />
                                 <ComboBoxItem Content="Leave where Windows puts them" />
+                                <ComboBoxItem Content="Open on the monitor with the mouse pointer" />
                             </ComboBox>
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=SquareMultiple24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Open dialogs on the same monitor as their app" />
+                                    <TextBlock x:Name="DialogsHint" Style="{StaticResource Secondary}" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:ToggleSwitch x:Name="DialogsToggle" AutomationProperties.Name="Open dialogs on the same monitor as their app" Click="DialogsToggle_Click" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Games24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Pause while a game or presentation is running" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="While a game or any other app runs fullscreen, or Windows is in presentation mode, windows aren't moved and nothing is learned. Windows that open meanwhile are placed when it ends, unless you've switched to them." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:ToggleSwitch x:Name="GameToggle" AutomationProperties.Name="Pause while a game or presentation is running" Click="GameToggle_Click" />
                         </ui:CardControl>
                         <ui:CardControl Icon="{ui:SymbolIcon Symbol=DesktopArrowRight24}">
                             <ui:CardControl.Header>
@@ -211,6 +230,15 @@
                                 </StackPanel>
                             </ui:CardControl.Header>
                             <ui:ToggleSwitch x:Name="StartupToggle" AutomationProperties.Name="Start with Windows" Click="StartupToggle_Click" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=PersonClock24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Also place apps that opened while signing in" />
+                                    <TextBlock x:Name="SignInHint" Style="{StaticResource Secondary}" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:ToggleSwitch x:Name="SignInToggle" AutomationProperties.Name="Also place apps that opened while signing in" Click="SignInToggle_Click" />
                         </ui:CardControl>
 
                         <StackPanel x:Name="RecentPanel" Margin="0,22,0,0">
@@ -363,7 +391,14 @@
                                                             <ColumnDefinition Width="5*" /><ColumnDefinition Width="5*" />
                                                         </Grid.ColumnDefinitions>
                                                         <StackPanel Margin="0,0,8,0">
-                                                            <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                                                            <DockPanel>
+                                                                <!-- A tip for an app that keeps moving itself back (see Advanced) -->
+                                                                <ui:SymbolIcon DockPanel.Dock="Right" Symbol="Info16" FontSize="14" Margin="6,0,0,0"
+                                                                               Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}"
+                                                                               ToolTip="{Binding Hint}" AutomationProperties.Name="{Binding Hint}"
+                                                                               Visibility="{Binding HasHint, Converter={StaticResource ShowWhenTrue}}" />
+                                                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                                                            </DockPanel>
                                                             <TextBlock Text="{Binding Detail}" Style="{StaticResource Secondary}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
                                                         </StackPanel>
                                                         <StackPanel Grid.Column="1" ToolTip="{Binding OpensOn}">
@@ -389,8 +424,7 @@
                                         <ComboBox x:Name="TargetCombo" HorizontalAlignment="Stretch" AutomationProperties.Name="Open it on" SelectionChanged="TargetCombo_SelectionChanged" />
                                         <!-- Only for "Where I used it last": which monitors the app may open on -->
                                         <StackPanel x:Name="AllowedPanel" Margin="0,12,0,0" Visibility="Collapsed">
-                                            <TextBlock Style="{StaticResource Secondary}" FontSize="13"
-                                                       Text="It opens on whichever of these monitors you used it on last. If that one is off, it opens on the next one in this order:" />
+                                            <TextBlock x:Name="AllowedIntro" Style="{StaticResource Secondary}" FontSize="13" />
                                             <ItemsControl x:Name="AllowedList" Margin="0,6,0,0" KeyboardNavigation.TabNavigation="Continue" />
                                             <TextBlock x:Name="LastUsedLaunchOnlyNote" Style="{StaticResource Secondary}" Margin="0,4,0,0" Visibility="Collapsed"
                                                        Text="Note: with nothing running in the background, Monitor Window Control can't see where you use the app, so it opens where it was used when you last changed this." />
@@ -401,6 +435,51 @@
                                             <ComboBox x:Name="AppFallbackCombo" HorizontalAlignment="Stretch"
                                                       AutomationProperties.Name="If its monitor is off, open it on" />
                                         </StackPanel>
+                                        <!-- Where on the monitor its window goes -->
+                                        <StackPanel x:Name="PlacePanel" Margin="0,12,0,0">
+                                            <TextBlock Text="Place it" Margin="0,0,0,6" />
+                                            <ComboBox x:Name="PlaceCombo" HorizontalAlignment="Stretch" AutomationProperties.Name="Place it"
+                                                      SelectionChanged="PlaceCombo_SelectionChanged">
+                                                <ComboBoxItem Content="Centered" />
+                                                <ComboBoxItem Content="Where I last had it" />
+                                                <ComboBoxItem Content="Maximized" />
+                                            </ComboBox>
+                                            <DockPanel x:Name="PlaceLastPanel" Margin="0,4,0,0" Visibility="Collapsed">
+                                                <ui:Button x:Name="ResetPlaceButton" DockPanel.Dock="Right" Content="Reset" Appearance="Transparent"
+                                                           Margin="8,0,0,0" VerticalAlignment="Top" Click="ResetPlace_Click"
+                                                           AutomationProperties.Name="Reset: forget where it was on each monitor"
+                                                           ToolTip="Forget where it was on each monitor" />
+                                                <TextBlock x:Name="PlaceLastNote" Style="{StaticResource Secondary}" VerticalAlignment="Center" />
+                                            </DockPanel>
+                                        </StackPanel>
+                                        <!-- Advanced: timing for apps that show a splash screen or move themselves after opening -->
+                                        <ui:CardExpander x:Name="AdvancedExpander" Margin="0,12,0,0" Icon="{ui:SymbolIcon Symbol=Timer24}"
+                                                         AutomationProperties.Name="Advanced">
+                                            <ui:CardExpander.Header>
+                                                <StackPanel>
+                                                    <TextBlock Style="{StaticResource CardTitle}" Text="Advanced" />
+                                                    <TextBlock Style="{StaticResource Secondary}" Text="For an app that opens a splash screen first, or moves itself back after it's moved." />
+                                                </StackPanel>
+                                            </ui:CardExpander.Header>
+                                            <StackPanel>
+                                                <TextBlock x:Name="AdvancedTip" Style="{StaticResource Secondary}" FontSize="13" Margin="0,0,0,10"
+                                                           Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}" Visibility="Collapsed"
+                                                           Text="This app moved itself back twice after it was moved. Try a longer wait before moving." />
+                                                <TextBlock Text="Wait before moving" Margin="0,0,0,6" />
+                                                <ComboBox x:Name="WaitCombo" HorizontalAlignment="Stretch" AutomationProperties.Name="Wait before moving">
+                                                    <ComboBoxItem Content="Automatic" />
+                                                    <ComboBoxItem Content="1 second" />
+                                                    <ComboBoxItem Content="3 seconds" />
+                                                </ComboBox>
+                                                <TextBlock Text="Keep correcting for" Margin="0,12,0,6" />
+                                                <ComboBox x:Name="CorrectCombo" HorizontalAlignment="Stretch" AutomationProperties.Name="Keep correcting for">
+                                                    <ComboBoxItem Content="1 second" />
+                                                    <ComboBoxItem Content="5 seconds" />
+                                                </ComboBox>
+                                                <TextBlock Style="{StaticResource Secondary}" Margin="0,6,0,0"
+                                                           Text="If the app moves its window back to where it opened during this time, it's moved again (at most 3 times). After that it's always left where it is." />
+                                            </StackPanel>
+                                        </ui:CardExpander>
                                         <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
                                             <ui:Button Content="Save" Appearance="Primary" MinWidth="96" Click="ChangeMonitor_Click" />
                                             <ui:Button x:Name="ForgetButton" Content="Forget" Margin="8,0,0,0" Click="Forget_Click"

@@ -119,6 +119,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Surprising the user with mass moves, so command 1 is manual with a preview, and only the off-screen rescue is automatic. Skip DWMWA_CLOAKED windows so other virtual desktops aren't disturbed. Minimized windows: adjust rcNormalPosition with SetWindowPlacement rather than restoring them.
 
 ### 5. Place windows of apps that opened before Monitor Window Control started
+**Status:** built in v1.6.0 (the card is under Startup, next to Start with Windows, and works only with it on; 'foreground for more than about 3 s' is checked as 'the window in front, and you've used the keyboard or mouse more than 3 s after its app started', since Windows keeps no foreground history).
 
 *Placement · effort S*
 
@@ -131,6 +132,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Moving a window the user already started working in: the foreground-time check and the process-age limit keep this narrow. It must not apply when the user merely restarts the tray app mid-session (use the session logon time).
 
 ### 6. Late-uncloaking windows and virtual desktop awareness
+**Status:** built in v1.6.0 (the tidy-up commands it mentions wait for item 4; the Apps list, learning, 'Where I last had it' and moving an app's open windows ignore other desktops).
 
 *Stability · effort S*
 
@@ -158,6 +160,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Low. The fallback target must also be checked against the 'Monitor is off' flag. Windows placed on a non-main fallback must still count as displaced for the 'comes back' feature (today _fallbackPlaced only looks for 'isn't connected' plus main).
 
 ### 8. Remember where on the monitor: position, size and maximized per app
+**Status:** built in v1.6.0 ('Where I last had it' and 'Maximized' also apply when the window already opened on the right monitor; windows that can't be resized keep their size).
 
 *Placement · effort M*
 
@@ -170,6 +173,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Apps that resize themselves right after opening (the existing verify covers jumping back, not resizing, so verify the size once as well). Enforce minimum sizes by re-reading the rect. Recording the rect every 2 s must not write settings.json every tick: save only when it changes by more than a few percent.
 
 ### 9. Open dialogs and pop-ups on the same monitor as their app
+**Status:** built in v1.6.0 (only owned windows with a title bar count as dialogs; a dialog is also left alone when it runs as administrator or doesn't respond).
 
 *Placement · effort M*
 
@@ -243,6 +247,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** A driver that keeps reasserting its own primary could cause a loop: cap at 2 attempts per 5 minutes, then stop and log. Never act during the hold window, or while only one monitor is active.
 
 ### 15. 'Where my mouse is' as a placement choice
+**Status:** built in v1.6.0 (keyboard fallback: when the pointer hasn't moved for 2 minutes, the monitor of the window you were using counts).
 
 *Placement · effort S*
 
@@ -255,6 +260,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Low. Keyboard-only users may prefer 'the monitor of the focused window'; offer it as the same option's fallback when the cursor hasn't moved for a long time.
 
 ### 16. Pause while a game or presentation runs
+**Status:** partly built: the pause, the held windows and the status in the General page, tray tooltip and log are built; the optional GameConfigStore 'Game' badge (games defaulting to Never move) is not. Held windows that waited more than 15 minutes are left where they are.
 
 *Stability · effort S*
 
@@ -478,6 +484,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Matching each launched app's first window when several start at once; the helper needs a list mode. Overlaps PowerToys Workspaces, so position it as the monitor-aware, setup-tolerant version and keep it small.
 
 ### 34. Per-app timing for stubborn apps (Advanced)
+**Status:** built in v1.6.0 ('Keep correcting for' moves a window back at most 3 times; the tip shows on the Apps row until you change the app's timing).
 
 *Placement · effort S*
 

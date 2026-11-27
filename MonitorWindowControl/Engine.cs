@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -32,6 +33,15 @@ public sealed class Engine : IDisposable
     private const int RectSlack = 2;             // pixels a window may differ by and still count as "where it was left"
     private const int KeepMainMaxFixes = 2;      // "Keep my main monitor" changes it back at most this often…
     private static readonly TimeSpan KeepMainPeriod = TimeSpan.FromMinutes(5); // …in this long, then stops
+    private const int UncloakNewSeconds = 30;    // a window that Windows shows (uncloaks) this soon after it appeared is new
+    private const int SignInMaxSeconds = 180;    // "opened while signing in": this program started at most this long after sign-in…
+    private const int SignInAppAgeSeconds = 120; // …and the window's app started at most this long ago
+    private const int SignInInUseMs = 3000;      // the window in front, used this long after its app started, is left alone
+    private const double PositionChange = 0.03;  // "Where I last had it" is saved again only when the window moved this much (3 %)
+    private const int MouseIdleSeconds = 120;    // the pointer hasn't moved this long: use the monitor of the window you're using
+    private static readonly TimeSpan GameHoldMax = TimeSpan.FromMinutes(15); // windows held during a game older than this stay put
+    private const int MaxCorrections = 3;        // "Keep correcting for": an app is moved back at most this often per window
+    private const double DialogMaxShare = 0.6;   // a dialog this large (of the monitor's width or height) or larger is left alone
 
     /// <summary>"Treat as switched off: for 1 hour".</summary>
     public static readonly TimeSpan OffForAnHour = TimeSpan.FromHours(1);
@@ -80,6 +90,29 @@ public sealed class Engine : IDisposable
     // "Keep my main monitor".
     private readonly List<DateTime> _mainFixes = new();
     private bool _keepMainNoticeShown;
+
+    // Late uncloaking: new windows Windows still hides (cloaked), with when they were first seen.
+    private IntPtr _uncloakHook;
+    private readonly Dictionary<IntPtr, DateTime> _cloakedNew = new();
+
+    // "Also place apps that opened while signing in".
+    private readonly HashSet<IntPtr> _signInWindows = new();
+    private readonly List<string> _signInPlaced = new();
+
+    // "Pause while a game or presentation is running".
+    private bool _gamePaused;
+    private readonly Dictionary<IntPtr, DateTime> _heldForGame = new(); // new windows that wait until the game ends
+
+    // "The monitor I'm using (mouse pointer)".
+    private Native.POINT _lastCursor;
+    private DateTime _lastCursorMoveUtc = DateTime.UtcNow;
+
+    // "Where I last had it": the last sample of the window you're using (saved once it stays put).
+    private IntPtr _positionWindow;
+    private WindowPosition? _positionSample;
+
+    // Advanced timing: how often in a row each app moved itself back after being moved.
+    private readonly Dictionary<string, int> _jumpBacks = new(StringComparer.OrdinalIgnoreCase);
 
     private string? _streakKey, _streakDevice;
     private string? _learnedKey, _learnedDevice; // what the current streak already taught (don't redo it every 2 s)
@@ -178,7 +211,22 @@ public sealed class Engine : IDisposable
         public bool WasHeld;
         public int Requeues;             // times a move was cut short by a display change
         public Native.RECT PlacedRect;   // where the move left it (Verify only)
+        public DateTime FirstSeen;       // when the window first appeared (late uncloaking, "Wait before moving")
+        public bool AtSignIn;            // opened while signing in, before this program started
+        public Native.POINT Pointer;     // where the mouse pointer was when the window appeared
+        public string? FocusDevice;      // the monitor of the window you were using then (if the pointer sat still for long)
+        public bool IsDialog;            // a dialog centred over its app's window (Verify only)
+        public IntPtr Owner;             // that app window (Verify only)
+        public DateTime VerifyUntil;     // "Keep correcting for": check again until then (Verify only)
+        public int Corrections;          // times it was moved back after moving itself (Verify only)
+        public bool JumpedBack;          // it moved itself back at least once (Verify only)
+        public WindowPosition? Wanted;   // "Where I last had it": the spot it was put (Verify only)
+        public bool WantMaximized;       // "Maximized" (Verify only)
+        public bool SizeChecked;         // its size was checked once (Verify only)
     }
+
+    /// <summary>True while a game or presentation runs and "Pause while a game or presentation is running" is on.</summary>
+    public bool IsPausedForGame => IsActive ? _gamePaused : GameOrPresentationRunning();
 
     public Engine(IEngineHost host)
     {
@@ -245,19 +293,28 @@ public sealed class Engine : IDisposable
         }
 
         // Windows already on screen are not "new": never move them. Hidden ones (apps sitting in the tray)
-        // count as new when they're shown, like an app being opened.
+        // count as new when they're shown, like an app being opened. Right after you sign in, windows of apps that
+        // started with Windows before this program did are placed too (see QueueSignInWindows).
         _handled.Clear();
         foreach (var h in WindowInfo.EnumTopLevel())
             if (Native.IsWindowVisible(h)) _handled.Add(h);
+        Native.GetCursorPos(out _lastCursor);
+        _lastCursorMoveUtc = DateTime.UtcNow;
+        if (claimActive && learn && OnlyAppKey == null) QueueSignInWindows();
 
         _hook = Native.SetWinEventHook(Native.EVENT_OBJECT_DESTROY, Native.EVENT_OBJECT_SHOW, IntPtr.Zero,
             _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
         if (_hook == IntPtr.Zero)
         {
             Log.Write("ERROR: could not install the window hook; new windows won't be detected.");
+            _pending.Clear(); _signInWindows.Clear();
             ReleaseActiveMutex();
             return false;
         }
+        // New windows that Windows shows late (still cloaked when they appeared: Store apps, splash screens, other desktops).
+        _uncloakHook = Native.SetWinEventHook(Native.EVENT_OBJECT_UNCLOAKED, Native.EVENT_OBJECT_UNCLOAKED, IntPtr.Zero,
+            _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+        if (_pending.Count > 0) _placeTimer.Start();
         _learning = learn;
         _learnTimer.Start(); // also keeps settings fresh when another process changes them
         if (IsMainEngine)
@@ -278,7 +335,10 @@ public sealed class Engine : IDisposable
         _placeTimer.Stop(); _learnTimer.Stop(); _snapshotTimer.Stop();
         if (_hook != IntPtr.Zero) { Native.UnhookWinEvent(_hook); _hook = IntPtr.Zero; }
         if (_moveHook != IntPtr.Zero) { Native.UnhookWinEvent(_moveHook); _moveHook = IntPtr.Zero; }
+        if (_uncloakHook != IntPtr.Zero) { Native.UnhookWinEvent(_uncloakHook); _uncloakHook = IntPtr.Zero; }
         _pending.Clear(); _handled.Clear(); _appWindows.Clear(); _displaced.Clear(); ResetStreak();
+        _cloakedNew.Clear(); _signInWindows.Clear(); _signInPlaced.Clear(); _heldForGame.Clear(); _gamePaused = false;
+        _positionWindow = IntPtr.Zero; _positionSample = null;
         _snapshot.Clear(); _sleepSnapshot = null; _restoreBaseline = null; _restoreDue = false; _movedSinceWake.Clear();
         _vanishScanDue = _returnCheckDue = _keepMainDue = false;
         ReleaseActiveMutex();
@@ -289,6 +349,105 @@ public sealed class Engine : IDisposable
         if (_activeMutex == null) return;
         try { _activeMutex.ReleaseMutex(); } catch { }
         _activeMutex.Dispose(); _activeMutex = null;
+    }
+
+    /// <summary>
+    /// "Also place apps that opened while signing in": apps that start with Windows (Discord, Steam, Spotify…) often
+    /// show their windows before this program runs. Only right after you sign in (this program started at most 3
+    /// minutes after sign-in), windows whose app started at most 2 minutes ago are placed like new windows. Restarting
+    /// this program later in the session never does this, because sign-in was longer ago. The window in front is left
+    /// alone if you've already used it, and windows on other virtual desktops are left alone too.
+    /// </summary>
+    private void QueueSignInWindows()
+    {
+        if (!Settings.PlaceAppsOpenedAtSignIn || !Settings.Enabled) return;
+        long now = DateTime.UtcNow.ToFileTimeUtc();
+        long logon = SignInTime(now);
+        if (logon == 0 || now < logon || now - logon > SignInMaxSeconds * TimeSpan.TicksPerSecond) return;
+        if (!FirstStartSinceSignIn(logon)) return; // (switching how it runs right after signing in isn't signing in)
+        IntPtr fg = Native.GetForegroundWindow();
+        long lastInput = LastInputTime(now);
+        var utcNow = DateTime.UtcNow;
+        foreach (var h in _handled.ToList())
+        {
+            if (Native.IsIconic(h) || WindowInfo.Classify(h, _ownPid) != WindowInfo.Kind.AppWindow) continue;
+            long started = ProcessStartOf(h);
+            if (started == 0 || started < logon - 10 * TimeSpan.TicksPerSecond
+                || now - started > SignInAppAgeSeconds * TimeSpan.TicksPerSecond) continue;
+            if (h == fg && lastInput > started + SignInInUseMs * TimeSpan.TicksPerMillisecond) continue; // you're using it
+            if (!WindowInfo.IsOnCurrentDesktop(h)) continue;
+            _handled.Remove(h);
+            _signInWindows.Add(h);
+            var p = new Pending
+            {
+                Due = utcNow.AddMilliseconds(PlaceDelayMs), GiveUp = utcNow.AddMilliseconds(GiveUpMs), FirstSeen = utcNow, AtSignIn = true,
+            };
+            NotePointer(p, h, utcNow);
+            _pending[h] = p;
+        }
+        _signInPlaced.Clear();
+        if (_signInWindows.Count > 0)
+            Log.Write($"Signed in {TimeSpan.FromTicks(now - logon).TotalSeconds:0} s ago: checking {_signInWindows.Count} " +
+                      $"window{(_signInWindows.Count == 1 ? "" : "s")} of apps that opened before Monitor Window Control did.");
+    }
+
+    /// <summary>When you signed in to this session (a FILETIME), else when the PC started; 0 if Windows doesn't say.</summary>
+    private static long SignInTime(long now)
+    {
+        try
+        {
+            if (Native.WTSQuerySessionInformation(IntPtr.Zero, Native.WTS_CURRENT_SESSION, Native.WTSSessionInfo, out IntPtr buf, out int bytes))
+            {
+                try
+                {
+                    if (buf != IntPtr.Zero && bytes >= Native.WTSINFO_Size)
+                    {
+                        long logon = Marshal.ReadInt64(buf, Native.WTSINFO_LogonTime);
+                        if (logon > 0) return logon;
+                    }
+                }
+                finally { Native.WTSFreeMemory(buf); }
+            }
+        }
+        catch (Exception) { /* fall back to the time the PC started */ }
+        return now - Environment.TickCount64 * TimeSpan.TicksPerMillisecond;
+    }
+
+    /// <summary>
+    /// True the first time windows are watched after this sign-in (by the tray app or the helper): notes the sign-in
+    /// time in a small file next to the helper. Only read and written right after sign-in, never while placing windows.
+    /// </summary>
+    private static bool FirstStartSinceSignIn(long logon)
+    {
+        string file = Path.Combine(Paths.HelperDir, "signin.txt");
+        try
+        {
+            if (File.Exists(file) && long.TryParse(File.ReadAllText(file).Trim(), out long done)
+                && Math.Abs(done - logon) < 10 * TimeSpan.TicksPerSecond) return false;
+            Directory.CreateDirectory(Paths.HelperDir);
+            File.WriteAllText(file, logon.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        catch (Exception) { /* the time limits still apply */ }
+        return true;
+    }
+
+    /// <summary>When you last used the keyboard or mouse (a FILETIME), or 0 if Windows doesn't say.</summary>
+    private static long LastInputTime(long now)
+    {
+        var info = new Native.LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<Native.LASTINPUTINFO>() };
+        if (!Native.GetLastInputInfo(ref info)) return 0;
+        uint agoMs = unchecked((uint)Environment.TickCount - info.dwTime);
+        return now - agoMs * TimeSpan.TicksPerMillisecond;
+    }
+
+    /// <summary>A window placed (or left) after sign-in is done: once all are, say how many apps were moved.</summary>
+    private void SignInWindowDone(IntPtr hwnd)
+    {
+        if (!_signInWindows.Remove(hwnd) || _signInWindows.Count > 0) return;
+        if (_signInPlaced.Count > 0)
+            Note($"Placed {_signInPlaced.Count} app{(_signInPlaced.Count == 1 ? "" : "s")} that opened while you were signing in " +
+                 $"({string.Join(", ", _signInPlaced.Distinct())}).", "");
+        _signInPlaced.Clear();
     }
 
     /// <summary>True if some process (this one or another) is currently watching windows.</summary>
@@ -478,7 +637,7 @@ public sealed class Engine : IDisposable
         if (rule == null || rule.NeverMove) return false;
         if (rule.Fallback == FallbackModes.Monitor && rule.FallbackMonitor != null && Matches(rule.FallbackMonitor, m)) return true;
         if (!rule.Pinned) return false;
-        return rule.FollowLastUsed
+        return rule.FollowLastUsed || rule.FollowMouse
             ? rule.AllowedMonitors.Any(a => Matches(a, m))
             : string.Equals(Resolve(rule)?.DeviceName, m.DeviceName, StringComparison.OrdinalIgnoreCase);
     }
@@ -537,6 +696,7 @@ public sealed class Engine : IDisposable
         }
         foreach (var r in Settings.Apps.SelectMany(a => a.AllowedMonitors)
                      .Concat(Settings.Apps.Select(a => a.FallbackMonitor).OfType<MonitorRef>())
+                     .Concat(Settings.Apps.SelectMany(a => a.Positions).Select(p => p.Monitor))
                      .Concat(Settings.MonitorNicknames.Select(n => n.Monitor))
                      .Concat(Settings.MonitorOptions.Select(o => o.Monitor))
                      .Concat(new[] { Settings.FallbackMonitor, Settings.KeepMainMonitor }.OfType<MonitorRef>()))
@@ -646,10 +806,19 @@ public sealed class Engine : IDisposable
             return;
         }
 
+        if (eventType == Native.EVENT_OBJECT_UNCLOAKED)
+        {
+            OnUncloaked(hwnd);
+            return;
+        }
+
         if (eventType == Native.EVENT_OBJECT_DESTROY)
         {
             _handled.Remove(hwnd);
             _pending.Remove(hwnd);
+            _cloakedNew.Remove(hwnd);
+            _heldForGame.Remove(hwnd);
+            SignInWindowDone(hwnd);
             _displaced.Remove(hwnd);
             _snapshot.Remove(hwnd);
             _sleepSnapshot?.Remove(hwnd);
@@ -663,7 +832,40 @@ public sealed class Engine : IDisposable
         // (Enabled is checked when the window is placed, after settings are refreshed from disk.)
 
         var now = DateTime.UtcNow;
-        _pending[hwnd] = new Pending { Due = now.AddMilliseconds(PlaceDelayMs), GiveUp = now.AddMilliseconds(GiveUpMs) };
+        // (A new window Windows still hides keeps the time it first appeared, so it can't become "new" again later.)
+        var firstSeen = _cloakedNew.Remove(hwnd, out var seen) ? seen : now;
+        var p = new Pending { Due = now.AddMilliseconds(PlaceDelayMs), GiveUp = now.AddMilliseconds(GiveUpMs), FirstSeen = firstSeen };
+        NotePointer(p, hwnd, now);
+        _pending[hwnd] = p;
+        if (!_placeTimer.IsEnabled) _placeTimer.Start();
+    }
+
+    /// <summary>
+    /// For "The monitor I'm using (mouse pointer)": where the pointer is the moment a window appears (not 0.4 s later).
+    /// If the pointer hasn't moved for a couple of minutes (you're using the keyboard), the monitor of the window you're
+    /// using counts instead.
+    /// </summary>
+    private void NotePointer(Pending p, IntPtr hwnd, DateTime now)
+    {
+        Native.GetCursorPos(out p.Pointer);
+        if (now - _lastCursorMoveUtc < TimeSpan.FromSeconds(MouseIdleSeconds)
+            || p.Pointer.X != _lastCursor.X || p.Pointer.Y != _lastCursor.Y) return;
+        IntPtr fg = Native.GetForegroundWindow();
+        if (fg != IntPtr.Zero && fg != hwnd) p.FocusDevice = MonitorService.DeviceOfWindow(fg);
+    }
+
+    /// <summary>
+    /// Windows showed (uncloaked) a window it had hidden. It's new, and placed now, only if it appeared at most 30 s ago
+    /// and was still hidden then; switching virtual desktops shows old windows, which are never moved.
+    /// </summary>
+    private void OnUncloaked(IntPtr hwnd)
+    {
+        if (!_cloakedNew.Remove(hwnd, out var firstSeen) || _pending.ContainsKey(hwnd)) return;
+        var now = DateTime.UtcNow;
+        if (now - firstSeen > TimeSpan.FromSeconds(UncloakNewSeconds)) { _handled.Add(hwnd); return; }
+        var p = new Pending { Due = now.AddMilliseconds(PlaceDelayMs), GiveUp = now.AddMilliseconds(GiveUpMs), FirstSeen = firstSeen };
+        NotePointer(p, hwnd, now);
+        _pending[hwnd] = p;
         if (!_placeTimer.IsEnabled) _placeTimer.Start();
     }
 
@@ -683,6 +885,7 @@ public sealed class Engine : IDisposable
                 _handled.Add(hwnd);
                 Log.Write($"Error handling window 0x{hwnd.ToInt64():X}: {ex.Message}");
             }
+            if (p.AtSignIn && !(_pending.TryGetValue(hwnd, out var next) && next.AtSignIn)) SignInWindowDone(hwnd);
         }
         if (_pending.Count == 0) _placeTimer.Stop();
     }
@@ -721,27 +924,62 @@ public sealed class Engine : IDisposable
                 _handled.Add(hwnd);
                 return;
             case WindowInfo.Kind.NotYet:
-                if (now >= p.GiveUp) { _pending.Remove(hwnd); _handled.Add(hwnd); }
-                else p.Due = now.AddMilliseconds(RetryMs);
+                WaitForWindow(hwnd, p, now);
                 return;
+            case WindowInfo.Kind.OwnedDialog:
+                _pending.Remove(hwnd);
+                _handled.Add(hwnd);
+                ReloadIfChanged();
+                PlaceDialog(hwnd);
+                return;
+        }
+
+        ReloadIfChanged();
+        var app = WindowInfo.Identify(hwnd);
+        var rule = app == null ? null : Settings.Find(app.Key);
+        // "Wait before moving" (Advanced, for apps that show a splash screen first or move themselves after opening).
+        if (rule?.WaitMs is int wait && now < p.FirstSeen.AddMilliseconds(wait))
+        {
+            p.Due = p.FirstSeen.AddMilliseconds(wait);
+            if (p.GiveUp < p.Due.AddMilliseconds(GiveUpMs)) p.GiveUp = p.Due.AddMilliseconds(GiveUpMs);
+            return;
         }
 
         // A real app window: handle it exactly once.
         _pending.Remove(hwnd);
         _handled.Add(hwnd);
         if (_appWindows.Add(hwnd)) AppWindowsChanged?.Invoke();
-        ReloadIfChanged();
-        if (!Settings.Enabled || IsPausedForRemoteDesktop) return;
-
-        var app = WindowInfo.Identify(hwnd);
-        if (app == null) return;
+        if (!Settings.Enabled || IsPausedForRemoteDesktop || app == null) return;
         if (OnlyAppKey != null && !string.Equals(app.Key, OnlyAppKey, StringComparison.OrdinalIgnoreCase)) return;
+        if (UpdateGamePause())
+        {
+            // A game or presentation is running: this window waits until it ends (see ReleaseHeldWindows).
+            _heldForGame[hwnd] = now;
+            return;
+        }
         string title = WindowInfo.GetTitle(hwnd);
 
-        var rule = Settings.Find(app.Key);
         if (rule != null) rule = RefreshRuleDetails(rule, app, hwnd);
         try { PlaceNewWindow(hwnd, app, rule, title, p); }
         finally { WindowHandled?.Invoke(app.Key); }
+    }
+
+    /// <summary>
+    /// A new window that isn't ready yet (untitled, or still hidden by Windows). It's checked again shortly, up to 4 s.
+    /// A window Windows still hides then, or one on another virtual desktop, waits without any checking until Windows
+    /// shows it (see <see cref="OnUncloaked"/>).
+    /// </summary>
+    private void WaitForWindow(IntPtr hwnd, Pending p, DateTime now)
+    {
+        bool otherDesktop = WindowInfo.IsCloakedByShell(hwnd);
+        if (otherDesktop || (now >= p.GiveUp && WindowInfo.IsCloaked(hwnd)))
+        {
+            _pending.Remove(hwnd);
+            _cloakedNew[hwnd] = p.FirstSeen == default ? now : p.FirstSeen;
+            return;
+        }
+        if (now >= p.GiveUp) { _pending.Remove(hwnd); _handled.Add(hwnd); }
+        else p.Due = now.AddMilliseconds(RetryMs);
     }
 
     /// <summary>A move was cut short because monitors changed: try the window again once Windows has settled.</summary>
@@ -753,7 +991,9 @@ public sealed class Engine : IDisposable
         _pending[hwnd] = new Pending
         {
             Due = now.AddMilliseconds(HoldAfterChangeMs), GiveUp = now.AddMilliseconds(GiveUpMs + MaxHoldMs),
-            Requeues = p.Requeues + 1, WasHeld = true, HeldSinceUtc = now,
+            Requeues = p.Requeues + 1, WasHeld = true, HeldSinceUtc = now, AtSignIn = p.AtSignIn,
+            FirstSeen = p.FirstSeen == default ? now : p.FirstSeen, // (still new for late uncloaking, and the wait counts from then)
+            Pointer = p.Pointer, FocusDevice = p.FocusDevice,
         };
         if (!_placeTimer.IsEnabled) _placeTimer.Start();
         Log.Write($"Monitors changed while placing {what}; trying again when they've settled.");
@@ -787,13 +1027,18 @@ public sealed class Engine : IDisposable
     /// moves back once that monitor can be used again. <c>ReturnTo</c> is set instead for a window with no monitor of its
     /// own that Windows opened on a switched-off monitor: it goes back there when that monitor is switched on again.
     /// </summary>
-    private (MonitorInfo? Target, string Reason, bool Displaced, MonitorRef? ReturnTo) ChooseTarget(AppRule? rule, MonitorInfo? current)
+    private (MonitorInfo? Target, string Reason, bool Displaced, MonitorRef? ReturnTo) ChooseTarget(AppRule? rule, MonitorInfo? current,
+        MonitorInfo? pointer)
     {
         MonitorInfo? target;
         string reason;
         bool displaced = false;
         MonitorRef? returnTo = null;
-        if (rule != null)
+        if (rule is { FollowMouse: true, NeverMove: false })
+        {
+            (target, reason) = PointerTarget(rule, current, pointer);
+        }
+        else if (rule != null)
         {
             target = ResolveTarget(rule);
             reason = rule.FollowLastUsed ? "where you used it last" : rule.Pinned ? "set by you" : "learned";
@@ -813,6 +1058,11 @@ public sealed class Engine : IDisposable
                 reason += $"; {why}, so {where}";
                 displaced = target != null;
             }
+        }
+        else if (Settings.UnknownFollowMouse && pointer != null && CanUse(null, pointer))
+        {
+            target = pointer;
+            reason = "new app → the monitor you're using";
         }
         else if (Settings.MoveUnknownToMain)
         {
@@ -839,12 +1089,43 @@ public sealed class Engine : IDisposable
         return (target, reason, displaced, returnTo);
     }
 
+    /// <summary>
+    /// "The monitor I'm using (mouse pointer)": the monitor with the pointer when the window appeared, if it's one of the
+    /// monitors you ticked for the app and can be used. Else it stays where Windows put it, if that one is ticked, else
+    /// it goes to the first of its ticked monitors (in your order) that can be used.
+    /// </summary>
+    private (MonitorInfo? Target, string Reason) PointerTarget(AppRule rule, MonitorInfo? current, MonitorInfo? pointer)
+    {
+        if (pointer != null && IsAllowed(rule, pointer) && CanUse(rule, pointer)) return (pointer, "the monitor you're using");
+        string why = pointer == null ? "the pointer's monitor is unknown" : $"{pointer.Name} isn't one of its monitors";
+        if (current != null && IsAllowed(rule, current) && CanUse(rule, current)) return (current, $"{why}, so where Windows put it");
+        var next = AllowedInOrder(rule).Where(m => CanUse(rule, m)).ToList();
+        var pick = next.FirstOrDefault(m => !m.IsTemporary) ?? next.FirstOrDefault();
+        if (pick != null) return (pick, $"{why}, so the first of its monitors");
+        var fallback = FallbackFor(rule, out string where);
+        return (fallback, $"{why}; none of its monitors can be used, so {where}");
+    }
+
+    /// <summary>The monitor at a point on the screen (where the mouse pointer was), or null.</summary>
+    private MonitorInfo? MonitorAt(Native.POINT pt)
+    {
+        IntPtr hMon = Native.MonitorFromPoint(pt, Native.MONITOR_DEFAULTTONULL);
+        if (hMon == IntPtr.Zero) return null;
+        var mi = new Native.MONITORINFOEX { cbSize = Marshal.SizeOf<Native.MONITORINFOEX>() };
+        return Native.GetMonitorInfo(hMon, ref mi) ? MonitorByDevice(mi.szDevice) : null;
+    }
+
+    /// <summary>The monitor you were using when the window appeared: the pointer's, or (keyboard only) the focused window's.</summary>
+    private MonitorInfo? MonitorInUse(Pending p) => MonitorByDevice(p.FocusDevice) ?? MonitorAt(p.Pointer);
+
     private void PlaceNewWindow(IntPtr hwnd, AppIdentity app, AppRule? rule, string title, Pending p)
     {
         if (rule != null && rule.NeverMove) return;
-        var (target, reason, displaced, returnTo) = ChooseTarget(rule, MonitorOfWindow(hwnd));
+        bool wantsPointer = rule?.FollowMouse == true || (rule == null && Settings.UnknownFollowMouse);
+        var (target, reason, displaced, returnTo) = ChooseTarget(rule, MonitorOfWindow(hwnd), wantsPointer ? MonitorInUse(p) : null);
         if (target == null) return;
         if (p.WasHeld) reason += "; held during a display change";
+        if (p.AtSignIn) reason += "; it opened while you were signing in";
 
         // The taskbar may have moved or changed size since monitors were last read: use the current work area.
         string targetDevice = target.DeviceName;
@@ -860,24 +1141,23 @@ public sealed class Engine : IDisposable
         if (target == null) return;
 
         var current = MonitorOfWindow(hwnd);
-        if (current != null && current.DeviceName == target.DeviceName)
+        bool there = current != null && current.DeviceName == target.DeviceName;
+        var place = PlacementFor(rule, target);
+        // Already there: a window that opened while signing in is left as it is, and so is one that's already maximized
+        // (or can't be) when it only needs maximizing.
+        if (there && (p.AtSignIn || (place is { Spot: null } && (Native.IsZoomed(hwnd) || !WindowMover.CanMaximize(hwnd)))))
+            place = null;
+        if (there && place == null)
         {
             // Already there. If that's only a stand-in for its own monitor, it still goes back when that one can be used.
             RememberDisplaced(hwnd, rule, displaced, returnTo);
             return;
         }
 
-        if (Native.IsIconic(hwnd)) { Log.Write($"Skipped {app.Key} \"{title}\": minimized."); return; }
-        if (WindowMover.IsFullscreen(hwnd, current)) { Log.Write($"Skipped {app.Key} \"{title}\": fullscreen."); return; }
-        if (!_selfElevated && WindowInfo.IsProcessElevated(WindowInfo.GetPid(hwnd)))
-        {
-            Log.Write($"Skipped {app.Key} \"{title}\": it runs as administrator, so Windows doesn't allow Monitor Window Control to move it.");
-            return;
-        }
-        if (Native.IsHungAppWindow(hwnd)) { Log.Write($"Skipped {app.Key} \"{title}\": not responding."); return; }
+        if (!CanMoveNew(hwnd, current, app, title, quiet: there)) return;
 
         int generation = _topologyGeneration;
-        var result = WindowMover.Move(hwnd, target, () => generation == _topologyGeneration);
+        var result = MovePlaced(hwnd, target, place, there, () => generation == _topologyGeneration);
         string from = current?.Name ?? "?";
         if (result == WindowMover.Result.Aborted)
         {
@@ -887,20 +1167,64 @@ public sealed class Engine : IDisposable
         if (result == WindowMover.Result.Moved)
         {
             RememberDisplaced(hwnd, rule, displaced, returnTo);
-            Note($"Moved {app.DisplayName} from {from} to {target.Name} ({reason}).", $"{app.Key} \"{title}\"");
-            // Check once more shortly: some apps restore their saved position after showing.
+            string how = place == null ? "" : place.Value.Spot != null ? ", where you last had it" : ", maximized";
+            if (there) Log.Write($"Placed {app.DisplayName} on {target.Name}{how} ({reason}).  {app.Key} \"{title}\"");
+            else Note($"Moved {app.DisplayName} from {from} to {target.Name}{how} ({reason}).", $"{app.Key} \"{title}\"");
+            if (p.AtSignIn) _signInPlaced.Add(app.DisplayName);
+            // Check again shortly: some apps restore their saved position after showing ("Keep correcting for").
             Native.GetWindowRect(hwnd, out var placed);
+            var now = DateTime.UtcNow;
             _pending[hwnd] = new Pending
             {
-                Verify = true, Due = DateTime.UtcNow.AddMilliseconds(VerifyDelayMs),
+                Verify = true, Due = now.AddMilliseconds(VerifyDelayMs), VerifyUntil = now.AddMilliseconds(rule?.CorrectForMs ?? 1000),
                 TargetDevice = target.DeviceName, AppKey = app.Key, FromDevice = current?.DeviceName ?? "",
-                Generation = generation, PlacedRect = placed, Requeues = p.Requeues,
+                Generation = generation, PlacedRect = placed, Requeues = p.Requeues, AtSignIn = false,
+                Pointer = p.Pointer, FocusDevice = p.FocusDevice,
+                Wanted = place?.Spot, WantMaximized = place?.Maximize == true,
             };
         }
         else
         {
             Log.Write($"Could not move {app.Key} \"{title}\" from {from} to {target.Name}.");
         }
+    }
+
+    /// <summary>Minimized, fullscreen, administrator and not-responding windows are never moved (logged unless <paramref name="quiet"/>).</summary>
+    private bool CanMoveNew(IntPtr hwnd, MonitorInfo? current, AppIdentity app, string title, bool quiet)
+    {
+        string? why = Native.IsIconic(hwnd) ? "minimized"
+            : WindowMover.IsFullscreen(hwnd, current) ? "fullscreen"
+            : !_selfElevated && WindowInfo.IsProcessElevated(WindowInfo.GetPid(hwnd))
+                ? "it runs as administrator, so Windows doesn't allow Monitor Window Control to move it"
+            : Native.IsHungAppWindow(hwnd) ? "not responding" : null;
+        if (why != null && !quiet) Log.Write($"Skipped {app.Key} \"{title}\": {why}.");
+        return why == null;
+    }
+
+    /// <summary>"Place it" for one app on one monitor: a remembered spot and/or maximized. Null = centered.</summary>
+    private readonly record struct Placement(WindowPosition? Spot, bool Maximize);
+
+    private Placement? PlacementFor(AppRule? rule, MonitorInfo target)
+    {
+        if (rule == null || rule.NeverMove) return null;
+        if (rule.Place == PlaceModes.Maximized) return new Placement(null, true);
+        if (rule.Place == PlaceModes.Last && PositionOn(rule, target) is { } spot) return new Placement(spot, spot.Maximized);
+        return null;
+    }
+
+    /// <summary>Where the app's window was on this monitor ("Where I last had it"), or null if it isn't known.</summary>
+    private WindowPosition? PositionOn(AppRule rule, MonitorInfo m) => rule.Positions.FirstOrDefault(p => Matches(p.Monitor, m));
+
+    /// <summary>
+    /// Moves a window onto the target: centred (the default), at a remembered spot, and/or maximized. A window that's
+    /// already there (<paramref name="there"/>) is only given its spot or maximized.
+    /// </summary>
+    private static WindowMover.Result MovePlaced(IntPtr hwnd, MonitorInfo target, Placement? place, bool there, Func<bool> stillValid)
+    {
+        var result = place?.Spot is { } spot ? WindowMover.PlaceAtFraction(hwnd, target, spot, stillValid)
+            : there ? WindowMover.Result.Moved : WindowMover.Move(hwnd, target, stillValid);
+        if (result == WindowMover.Result.Moved && place?.Maximize == true) WindowMover.Maximize(hwnd);
+        return result;
     }
 
     private void Verify(IntPtr hwnd, Pending p)
@@ -919,18 +1243,182 @@ public sealed class Engine : IDisposable
         if (target == null || current == null) return;
         if (current.DeviceName == target.DeviceName)
         {
-            // Still where we put it. An app that rescaled itself for the monitor's DPI after the move can now stick out
-            // past the edge: pull it back in, but only if it's still where we left it (otherwise you moved it).
-            Native.GetWindowRect(hwnd, out var now);
-            if (Math.Abs(now.Left - p.PlacedRect.Left) <= 1 && Math.Abs(now.Top - p.PlacedRect.Top) <= 1
-                && WindowMover.KeepInside(hwnd, target))
-                Log.Write($"{p.AppKey} changed size after the move; kept it fully on {target.Name}.");
+            if (!p.IsDialog) CheckSize(hwnd, p, target);
+            if (!KeepChecking(hwnd, p) && !p.JumpedBack && !p.IsDialog) _jumpBacks.Remove(p.AppKey);
             return;
         }
         // Apps that restore their saved position jump back to where they opened. Anywhere else, you moved it: leave it.
         if (!string.Equals(current.DeviceName, p.FromDevice, StringComparison.OrdinalIgnoreCase)) return;
-        if (WindowMover.MoveTo(hwnd, target))
-            Log.Write($"{p.AppKey} moved itself back to {current.Name}; moved it to {target.Name} again.");
+        if (!p.JumpedBack) { p.JumpedBack = true; if (!p.IsDialog) NoteJumpBack(p.AppKey); }
+        if (p.Corrections >= MaxCorrections) return;
+        p.Corrections++;
+        bool moved = p.IsDialog
+            ? CenterDialog(hwnd, p.Owner, target)
+            : MovePlaced(hwnd, target, p.Wanted != null || p.WantMaximized ? new Placement(p.Wanted, p.WantMaximized) : null,
+                         false, () => p.Generation == _topologyGeneration) == WindowMover.Result.Moved;
+        if (!moved) return;
+        Log.Write($"{p.AppKey} moved itself back to {current.Name}; moved it to {target.Name} again.");
+        KeepChecking(hwnd, p);
+    }
+
+    /// <summary>
+    /// Still where it was put. An app that rescaled itself for the monitor's DPI after the move can now stick out past
+    /// the edge: pull it back in, but only if it's still where it was left (otherwise you moved it). An app that resized
+    /// itself right after opening is put back at its remembered spot or maximized again, once.
+    /// </summary>
+    private void CheckSize(IntPtr hwnd, Pending p, MonitorInfo target)
+    {
+        Native.GetWindowRect(hwnd, out var now);
+        bool untouched = Math.Abs(now.Left - p.PlacedRect.Left) <= 1 && Math.Abs(now.Top - p.PlacedRect.Top) <= 1;
+        if (!p.SizeChecked && (p.Wanted != null || p.WantMaximized))
+        {
+            p.SizeChecked = true;
+            bool off = p.WantMaximized ? !Native.IsZoomed(hwnd) && WindowMover.CanMaximize(hwnd)
+                : !Native.IsZoomed(hwnd) && !SameRect(now, p.PlacedRect);
+            if (off && MovePlaced(hwnd, target, new Placement(p.Wanted, p.WantMaximized), true,
+                                  () => p.Generation == _topologyGeneration) == WindowMover.Result.Moved)
+            {
+                Log.Write($"{p.AppKey} changed its size after opening; put it back {(p.Wanted != null ? "where you last had it" : "maximized")}.");
+                return;
+            }
+        }
+        if (untouched && WindowMover.KeepInside(hwnd, target))
+            Log.Write($"{p.AppKey} changed size after the move; kept it fully on {target.Name}.");
+    }
+
+    /// <summary>"Keep correcting for": checks the window again shortly while that time isn't over. False when it's over.</summary>
+    private bool KeepChecking(IntPtr hwnd, Pending p)
+    {
+        var now = DateTime.UtcNow;
+        if (now.AddMilliseconds(VerifyDelayMs) > p.VerifyUntil) return false;
+        p.Due = now.AddMilliseconds(VerifyDelayMs);
+        Native.GetWindowRect(hwnd, out p.PlacedRect);
+        _pending[hwnd] = p;
+        if (!_placeTimer.IsEnabled) _placeTimer.Start();
+        return true;
+    }
+
+    /// <summary>
+    /// An app moved itself back after being moved. Twice in a row (two windows, or two openings) and the log and the
+    /// Apps page suggest a longer "Wait before moving".
+    /// </summary>
+    private void NoteJumpBack(string key)
+    {
+        int n = _jumpBacks.TryGetValue(key, out int c) ? c + 1 : 1;
+        _jumpBacks[key] = n;
+        if (n != 2) return;
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var rule = Settings.Find(key);
+        Log.Write($"{rule?.DisplayName ?? key} moved itself back twice: try a longer wait (Apps page, select it, Advanced).  [{key}]");
+        if (rule == null || rule.MovedItselfBack || rule.WaitMs == 3000) return;
+        rule.MovedItselfBack = true;
+        Save();
+        Changed?.Invoke();
+    }
+
+    // ------------------------------------------------------------------ dialogs
+
+    /// <summary>
+    /// "Open dialogs on the same monitor as their app": a dialog (Save As, Print, Settings…) that opened entirely on
+    /// another monitor than its app's window is centred over that window there, and never resized. Left alone: large
+    /// windows (60 % of the monitor's width or height or more), dialogs that overlap the app's monitor at all, and
+    /// dialogs of apps set to "Never move". Like other windows, each dialog is placed once.
+    /// </summary>
+    private void PlaceDialog(IntPtr hwnd)
+    {
+        if (!Settings.Enabled || !Settings.MoveDialogsWithApp || IsPausedForRemoteDesktop) return;
+        IntPtr owner = Native.GetAncestor(hwnd, Native.GA_ROOTOWNER);
+        if (owner == IntPtr.Zero || owner == hwnd || !Native.IsWindowVisible(owner) || Native.IsIconic(owner)) return;
+        var app = WindowInfo.Identify(owner);
+        if (app == null || Settings.Find(app.Key)?.NeverMove == true) return;
+        if (OnlyAppKey != null && !string.Equals(app.Key, OnlyAppKey, StringComparison.OrdinalIgnoreCase)) return;
+        var target = MonitorOfWindow(owner);
+        var current = MonitorOfWindow(hwnd);
+        if (target == null || current == null || current.DeviceName == target.DeviceName) return;
+        if (!Native.GetWindowRect(hwnd, out var r)) return;
+        var b = target.Bounds;
+        if (r.Left < b.Right && r.Right > b.Left && r.Top < b.Bottom && r.Bottom > b.Top) return; // partly on the app's monitor
+        if (r.Width >= target.Work.Width * DialogMaxShare || r.Height >= target.Work.Height * DialogMaxShare) return;
+        if (UpdateGamePause() || Native.IsHungAppWindow(hwnd)) return;
+        if (!_selfElevated && WindowInfo.IsProcessElevated(WindowInfo.GetPid(hwnd))) return;
+
+        int generation = _topologyGeneration;
+        if (!CenterDialog(hwnd, owner, target)) return;
+        Log.Write($"Moved a dialog of {app.DisplayName} from {current.Name} to {target.Name}, over its window.  {app.Key} \"{WindowInfo.GetTitle(hwnd)}\"");
+        Native.GetWindowRect(hwnd, out var placed);
+        var now = DateTime.UtcNow;
+        _pending[hwnd] = new Pending
+        {
+            Verify = true, IsDialog = true, Owner = owner, Due = now.AddMilliseconds(VerifyDelayMs), VerifyUntil = now.AddMilliseconds(1000),
+            TargetDevice = target.DeviceName, AppKey = app.Key, FromDevice = current.DeviceName, Generation = generation, PlacedRect = placed,
+        };
+    }
+
+    /// <summary>Centres a dialog over its app's window (which must still be open) on the target monitor.</summary>
+    private static bool CenterDialog(IntPtr hwnd, IntPtr owner, MonitorInfo target) =>
+        Native.IsWindow(owner) && WindowMover.CenterOver(hwnd, owner, target);
+
+    // ------------------------------------------------------------------ games and presentations
+
+    /// <summary>
+    /// "Pause while a game or presentation is running": true while Windows says a game runs in exclusive fullscreen or
+    /// presentation mode is on, or the window in front has no title bar and covers its whole monitor (a borderless game).
+    /// Cheap enough to check on every new window and every learning tick.
+    /// </summary>
+    private bool GameOrPresentationRunning()
+    {
+        if (!Settings.PauseForGames) return false;
+        try
+        {
+            if (Native.SHQueryUserNotificationState(out int state) == 0
+                && state is Native.QUNS_RUNNING_D3D_FULL_SCREEN or Native.QUNS_PRESENTATION_MODE) return true;
+        }
+        catch (EntryPointNotFoundException) { /* very old Windows */ }
+        // (The lock screen, Task View and Alt+Tab are fullscreen too, but they're part of Windows, not a game.)
+        if (_locked) return _gamePaused;
+        IntPtr fg = Native.GetForegroundWindow();
+        if (fg == IntPtr.Zero || WindowInfo.GetPid(fg) == _ownPid || WindowInfo.IsShellWindow(fg)) return false;
+        return WindowMover.IsFullscreen(fg, MonitorByDevice(MonitorService.DeviceOfWindow(fg)));
+    }
+
+    /// <summary>Works out whether a game or presentation pauses placing and learning now (and says so when that changes).</summary>
+    private bool UpdateGamePause()
+    {
+        bool paused = IsActive && GameOrPresentationRunning();
+        if (paused == _gamePaused) return paused;
+        _gamePaused = paused;
+        if (paused)
+        {
+            ResetStreak();
+            Log.Write("Paused: a game or presentation is running. New windows wait until it ends, and nothing is learned.");
+        }
+        else
+        {
+            Log.Write("The game or presentation ended: placing windows again.");
+            ReleaseHeldWindows();
+        }
+        Changed?.Invoke();
+        return paused;
+    }
+
+    /// <summary>
+    /// The game or presentation ended: windows that opened meanwhile are placed now, except ones you've switched to
+    /// (you're using them where they are) and ones that have waited longer than 15 minutes.
+    /// </summary>
+    private void ReleaseHeldWindows()
+    {
+        var now = DateTime.UtcNow;
+        foreach (var (h, since) in _heldForGame.ToList())
+        {
+            if (!Native.IsWindow(h) || now - since > GameHoldMax || _pending.ContainsKey(h)) continue;
+            _handled.Remove(h);
+            var p = new Pending { Due = now, GiveUp = now.AddMilliseconds(GiveUpMs), FirstSeen = now };
+            NotePointer(p, h, now);
+            _pending[h] = p;
+        }
+        _heldForGame.Clear();
+        if (_pending.Count > 0 && !_placeTimer.IsEnabled) _placeTimer.Start();
     }
 
     // ------------------------------------------------------------------ learning
@@ -941,8 +1429,12 @@ public sealed class Engine : IDisposable
         {
             _handled.RemoveWhere(h => !Native.IsWindow(h));
             foreach (var gone in _displaced.Keys.Where(h => !Native.IsWindow(h)).ToList()) _displaced.Remove(gone);
+            ForgetOldCloakedWindows();
         }
         ReloadIfChanged(); // pick up changes made in the settings window / by the helper
+        TrackPointer();
+        bool gamePaused = UpdateGamePause();
+        if (gamePaused) _heldForGame.Remove(Native.GetForegroundWindow()); // you switched to it: it stays where it is
         if (_identityBackfillDue && DateTime.UtcNow - _lastDisplayEventUtc > TimeSpan.FromMilliseconds(HoldAfterChangeMs))
             BackfillIdentity();
         if (IsMainEngine)
@@ -952,6 +1444,8 @@ public sealed class Engine : IDisposable
             AfterMonitorChanges(now);
         }
         if (!_learning) return;
+        if (gamePaused) { ResetStreak(); _positionSample = null; return; } // a game's own windows teach nothing
+        SamplePosition(DateTime.UtcNow);
 
         // Don't learn while monitors are changing (sleep, display driver reset, a game switching resolution…) or
         // when only one monitor is connected: then you use apps where they *have* to be, not where you want them.
@@ -980,11 +1474,97 @@ public sealed class Engine : IDisposable
         else { _streakKey = app.Key; _streakDevice = mon.DeviceName; _streakCount = 1; }
 
         // Learn once per streak: using the same app on the same monitor for an hour doesn't redo it every 2 s.
-        if (_streakCount >= LearnChecksNeeded && (app.Key != _learnedKey || mon.DeviceName != _learnedDevice))
+        // (Windows on another virtual desktop never teach anything; checked only now, as it asks Windows' shell.)
+        if (_streakCount >= LearnChecksNeeded && (app.Key != _learnedKey || mon.DeviceName != _learnedDevice)
+            && WindowInfo.IsOnCurrentDesktop(fg))
         {
             _learnedKey = app.Key; _learnedDevice = mon.DeviceName;
             Learn(app, mon, fg);
         }
+    }
+
+    /// <summary>Notes when the mouse pointer last moved (for "The monitor I'm using", with the keyboard only).</summary>
+    private void TrackPointer()
+    {
+        if (!Native.GetCursorPos(out var pt) || (pt.X == _lastCursor.X && pt.Y == _lastCursor.Y)) return;
+        _lastCursor = pt;
+        _lastCursorMoveUtc = DateTime.UtcNow;
+    }
+
+    /// <summary>New windows still hidden after 30 s will never count as new: stop waiting for them.</summary>
+    private void ForgetOldCloakedWindows()
+    {
+        var now = DateTime.UtcNow;
+        foreach (var (h, seen) in _cloakedNew.ToList())
+        {
+            if (Native.IsWindow(h) && now - seen <= TimeSpan.FromSeconds(UncloakNewSeconds)) continue;
+            _cloakedNew.Remove(h);
+            if (Native.IsWindow(h)) _handled.Add(h);
+        }
+        foreach (var (h, since) in _heldForGame.ToList())
+            if (!Native.IsWindow(h) || now - since > GameHoldMax) _heldForGame.Remove(h);
+    }
+
+    /// <summary>
+    /// "Where I last had it": every learning tick, notes where the window you're using is on its monitor (as fractions of
+    /// the work area), for apps set to that. It's saved only once it has stayed put for two ticks and moved more than a
+    /// few percent from what's saved, so settings aren't written every 2 seconds. Nothing is noted while you drag a
+    /// window, while monitors are changing, for fullscreen windows, or on a monitor that's switched off.
+    /// </summary>
+    private void SamplePosition(DateTime now)
+    {
+        if (!Settings.Enabled || !Settings.Apps.Any(a => a.Place == PlaceModes.Last && !a.NeverMove)
+            || IsRemoteSession || HasDuplicatedMonitors
+            || now - _lastMonitorChangeUtc < TimeSpan.FromSeconds(MonitorSettleSeconds)
+            || now - _lastDisplayEventUtc < TimeSpan.FromMilliseconds(SettledMs))
+        { _positionSample = null; return; }
+        var sample = PositionOfForeground(out IntPtr fg, out var app, out var mon);
+        bool steady = sample != null && fg == _positionWindow && _positionSample != null && SamePosition(sample, _positionSample, 0.005)
+                      && Matches(_positionSample.Monitor, mon!);
+        _positionWindow = fg;
+        _positionSample = sample;
+        if (!steady) return;
+        var rule = Settings.Find(app!.Key)!;
+        var saved = PositionOn(rule, mon!);
+        if (saved != null && SamePosition(saved, sample!, PositionChange)) return;
+        if (!WindowInfo.IsOnCurrentDesktop(fg)) return;
+        SavePosition(app.Key, mon!, sample!);
+    }
+
+    /// <summary>Where the window you're using is, if its app is set to "Where I last had it"; else null.</summary>
+    private WindowPosition? PositionOfForeground(out IntPtr fg, out AppIdentity? app, out MonitorInfo? mon)
+    {
+        app = null; mon = null;
+        fg = Native.GetForegroundWindow();
+        if (fg == IntPtr.Zero || _pending.ContainsKey(fg) || Native.IsIconic(fg)
+            || (Native.GetAsyncKeyState(Native.VK_LBUTTON) & 0x8000) != 0 // dragging it right now
+            || WindowInfo.Classify(fg, _ownPid) != WindowInfo.Kind.AppWindow) return null;
+        app = WindowInfo.Identify(fg);
+        var rule = app == null ? null : Settings.Find(app.Key);
+        if (rule == null || rule.Place != PlaceModes.Last || rule.NeverMove) return null;
+        mon = MonitorOfWindow(fg);
+        if (mon == null || mon.IsSwitchedOff || WindowMover.IsFullscreen(fg, mon)) return null;
+        var position = WindowMover.FractionOf(fg, mon);
+        if (position != null) position.Monitor = RefTo(mon);
+        return position;
+    }
+
+    private static bool SamePosition(WindowPosition a, WindowPosition b, double tolerance) =>
+        a.Maximized == b.Maximized && Math.Abs(a.X - b.X) <= tolerance && Math.Abs(a.Y - b.Y) <= tolerance
+        && Math.Abs(a.Width - b.Width) <= tolerance && Math.Abs(a.Height - b.Height) <= tolerance;
+
+    /// <summary>Saves where an app's window is on a monitor ("Where I last had it").</summary>
+    private void SavePosition(string key, MonitorInfo mon, WindowPosition position)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var rule = Settings.Find(key);
+        if (rule == null || rule.Place != PlaceModes.Last) return;
+        rule.Positions.RemoveAll(p => Matches(p.Monitor, mon));
+        rule.Positions.Add(position);
+        Save();
+        Log.Write($"Remembered where {rule.DisplayName} is on {mon.Name}{(position.Maximized ? " (maximized)" : "")}.  [{key} {mon.DeviceName}]");
+        Changed?.Invoke();
     }
 
     private void ResetStreak() { _streakKey = null; _streakDevice = null; _streakCount = 0; _learnedKey = null; _learnedDevice = null; }
@@ -1095,6 +1675,7 @@ public sealed class Engine : IDisposable
         if (now - _lastDisplayEventUtc < TimeSpan.FromMilliseconds(SettledMs)) return;
         if (_vanishScanDue) { _vanishScanDue = false; NoteWindowsOfMissingMonitors(); }
         if (_locked) return; // nothing moves while nobody is looking
+        if (_gamePaused) return; // nor while a game or presentation runs: this waits until it ends
         if (_keepMainDue) { _keepMainDue = false; EnforceMainMonitor(now); }
         if (_restoreDue) { RestoreAfterSleepTick(now); return; }
         if (_returnCheckDue && now >= _returnNotBeforeUtc) { _returnCheckDue = false; MoveDisplacedBack(); }
@@ -1206,7 +1787,7 @@ public sealed class Engine : IDisposable
         if (d.AppKey != null)
         {
             var rule = Settings.Find(d.AppKey);
-            if (rule == null || rule.NeverMove) return (null, true);
+            if (rule == null || rule.NeverMove || rule.FollowMouse) return (null, true);
             var m = Resolve(rule);
             return m != null && IsAllowed(rule, m) && CanUse(rule, m) ? (m, false) : (null, false);
         }
@@ -1416,13 +1997,57 @@ public sealed class Engine : IDisposable
         Changed?.Invoke();
     }
 
-    public void SetMoveUnknownToMain(bool on)
+    public void SetMoveUnknownToMain(bool on) => SetUnknownApps(on, followMouse: false);
+
+    /// <summary>
+    /// "Apps it hasn't learned yet": the main monitor, where Windows puts them, or (<paramref name="followMouse"/>) the
+    /// monitor with the mouse pointer. With the pointer, "main monitor" is saved too, for older versions.
+    /// </summary>
+    public void SetUnknownApps(bool toMain, bool followMouse)
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
-        if (Settings.MoveUnknownToMain == on) return;
-        Settings.MoveUnknownToMain = on; Save();
-        Log.Write("Apps it hasn't learned yet: " + (on ? "open on main monitor" : "leave where Windows puts them"));
+        toMain |= followMouse;
+        if (Settings.MoveUnknownToMain == toMain && Settings.UnknownFollowMouse == followMouse) return;
+        Settings.MoveUnknownToMain = toMain;
+        Settings.UnknownFollowMouse = followMouse;
+        Save();
+        Log.Write("Apps it hasn't learned yet: " + (followMouse ? "open on the monitor with the mouse pointer"
+            : toMain ? "open on main monitor" : "leave where Windows puts them"));
+        Changed?.Invoke();
+    }
+
+    /// <summary>"Open dialogs on the same monitor as their app".</summary>
+    public void SetMoveDialogsWithApp(bool on)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (Settings.MoveDialogsWithApp == on) return;
+        Settings.MoveDialogsWithApp = on; Save();
+        Log.Write("Open dialogs on the same monitor as their app: " + (on ? "on" : "off"));
+        Changed?.Invoke();
+    }
+
+    /// <summary>"Pause while a game or presentation is running".</summary>
+    public void SetPauseForGames(bool on)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (Settings.PauseForGames == on) return;
+        Settings.PauseForGames = on; Save();
+        Log.Write("Pause while a game or presentation is running: " + (on ? "on" : "off"));
+        if (IsActive) UpdateGamePause(); // turning it off while a game runs places the windows that waited
+        Changed?.Invoke();
+    }
+
+    /// <summary>"Also place apps that opened while signing in".</summary>
+    public void SetPlaceAppsOpenedAtSignIn(bool on)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (Settings.PlaceAppsOpenedAtSignIn == on) return;
+        Settings.PlaceAppsOpenedAtSignIn = on; Save();
+        Log.Write("Also place apps that opened while signing in: " + (on ? "on" : "off"));
         Changed?.Invoke();
     }
 
@@ -1444,6 +2069,7 @@ public sealed class Engine : IDisposable
         rule.Pinned = true;
         rule.NeverMove = monitor == null;
         rule.FollowLastUsed = false;
+        rule.FollowMouse = false;
         rule.AllowedMonitors.Clear();
         if (monitor != null) SetMonitor(rule, monitor);
         rule.UpdatedUtc = DateTime.UtcNow;
@@ -1453,7 +2079,7 @@ public sealed class Engine : IDisposable
         string moved = "";
         if (monitor != null)
         {
-            int n = MoveOpenWindows(rule.Key, monitor);
+            int n = MoveOpenWindows(rule, monitor);
             if (n > 0) moved = n == 1 ? " Its open window was moved there." : $" Its {n} open windows were moved there.";
         }
         Note(monitor == null ? $"Set by you: never move {rule.DisplayName}." : $"Set by you: {rule.DisplayName} opens on {monitor.Name}.{moved}",
@@ -1479,6 +2105,7 @@ public sealed class Engine : IDisposable
         rule.Pinned = true;
         rule.NeverMove = false;
         rule.FollowLastUsed = true;
+        rule.FollowMouse = false;
         rule.AllowedMonitors = allowed.Select(RefTo).ToList();
         // Start from where it is now / was last, if that's allowed; otherwise the first allowed monitor.
         var start = new[] { currentMonitor, Resolve(rule) }.FirstOrDefault(m => m != null && IsAllowed(rule, m))
@@ -1489,6 +2116,89 @@ public sealed class Engine : IDisposable
         ResetStreak();
         Note($"Set by you: {rule.DisplayName} opens where you used it last ({string.Join(" or ", allowed.Select(m => m.Name))}).",
              $"[{rule.Key} {string.Join(",", allowed.Select(m => m.DeviceName))}]");
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// "The monitor I'm using (mouse pointer)": the app's new windows open on the monitor with the mouse pointer, if
+    /// it's one of <paramref name="allowed"/> (in your order: the first one that can be used is taken otherwise).
+    /// Its open windows aren't moved.
+    /// </summary>
+    public void SetFollowMouse(string key, IReadOnlyList<MonitorInfo> allowed, string? displayName = null)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var rule = Settings.Find(key);
+        if (rule == null)
+        {
+            rule = new AppRule { Key = key, DisplayName = displayName ?? key };
+            Settings.Apps.Add(rule);
+        }
+        rule.LaunchTarget ??= FindLaunchTarget(key);
+        rule.Pinned = true;
+        rule.NeverMove = false;
+        rule.FollowLastUsed = false;
+        rule.FollowMouse = true;
+        // Every monitor ticked = any monitor (also ones connected later).
+        rule.AllowedMonitors = allowed.Count >= _monitors.Count ? new List<MonitorRef>() : allowed.Select(RefTo).ToList();
+        rule.UpdatedUtc = DateTime.UtcNow;
+        Save();
+        ResetStreak();
+        Note($"Set by you: {rule.DisplayName} opens on the monitor you're using" +
+             (rule.AllowedMonitors.Count == 0 ? "." : $" ({string.Join(" or ", allowed.Select(m => m.Name))})."), $"[{rule.Key}]");
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// "Place it" and the Advanced timing for one saved app: <paramref name="place"/> is null (centered) or one of
+    /// <see cref="PlaceModes"/>; <paramref name="waitMs"/> and <paramref name="correctForMs"/> are null (automatic, 1 s)
+    /// or one of the choices in <see cref="AppTimings"/>.
+    /// </summary>
+    public void SetAppPlacement(string key, string? place, int? waitMs, int? correctForMs)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var rule = Settings.Find(key);
+        if (rule == null) return;
+        place = PlaceModes.Normalize(place);
+        waitMs = AppTimings.NormalizeWait(waitMs);
+        correctForMs = AppTimings.NormalizeCorrect(correctForMs);
+        bool timingChanged = rule.WaitMs != waitMs || rule.CorrectForMs != correctForMs;
+        if (rule.Place == place && !timingChanged) return;
+        if (rule.Place != place) Log.Write($"Set by you: {rule.DisplayName} is placed {PlaceText(place)}.  [{rule.Key}]");
+        if (timingChanged)
+        {
+            Log.Write($"Set by you: {rule.DisplayName} waits {(waitMs == null ? "the usual time" : $"{waitMs / 1000} s")} before moving, " +
+                      $"and is kept in place for {(correctForMs ?? 1000) / 1000} s.  [{rule.Key}]");
+            rule.MovedItselfBack = false; // you've acted on the tip
+            _jumpBacks.Remove(rule.Key);
+        }
+        rule.Place = place; rule.WaitMs = waitMs; rule.CorrectForMs = correctForMs;
+        rule.UpdatedUtc = DateTime.UtcNow;
+        Save();
+        _positionSample = null;
+        Changed?.Invoke();
+    }
+
+    /// <summary>"Place it" in words, for the log.</summary>
+    private static string PlaceText(string? place) => place switch
+    {
+        PlaceModes.Last => "where you last had it",
+        PlaceModes.Maximized => "maximized",
+        _ => "in the center of its monitor",
+    };
+
+    /// <summary>"Where I last had it" → Reset: forgets where the app's window was on every monitor.</summary>
+    public void ResetPositions(string key)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var rule = Settings.Find(key);
+        if (rule == null || rule.Positions.Count == 0) return;
+        rule.Positions.Clear();
+        Save();
+        _positionSample = null;
+        Note($"Forgot where {rule.DisplayName} was on each monitor; it opens in the center until you've used it again.", $"[{rule.Key}]");
         Changed?.Invoke();
     }
 
@@ -1816,7 +2526,7 @@ public sealed class Engine : IDisposable
         var result = new Dictionary<string, OpenApp>(StringComparer.OrdinalIgnoreCase);
         foreach (var h in WindowInfo.EnumTopLevel()) // EnumWindows returns windows front to back
         {
-            if (WindowInfo.Classify(h, _ownPid) != WindowInfo.Kind.AppWindow) continue;
+            if (WindowInfo.Classify(h, _ownPid) != WindowInfo.Kind.AppWindow || !WindowInfo.IsOnCurrentDesktop(h)) continue;
             var app = WindowInfo.Identify(h);
             if (app == null) continue;
             if (result.TryGetValue(app.Key, out var existing)) result[app.Key] = existing with { Windows = existing.Windows + 1 };
@@ -1826,14 +2536,17 @@ public sealed class Engine : IDisposable
     }
 
     /// <summary>Moves the app's open windows to the monitor (you asked for it, so this is the one time we move existing windows).</summary>
-    private int MoveOpenWindows(string key, MonitorInfo target)
+    private int MoveOpenWindows(AppRule rule, MonitorInfo target)
     {
         int moved = 0;
+        string key = rule.Key;
+        var place = PlacementFor(rule, target);
         foreach (var h in WindowInfo.EnumTopLevel())
         {
             if (WindowInfo.Classify(h, _ownPid) != WindowInfo.Kind.AppWindow) continue;
             var app = WindowInfo.Identify(h);
             if (app == null || !string.Equals(app.Key, key, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!WindowInfo.IsOnCurrentDesktop(h)) continue; // windows on other virtual desktops aren't disturbed
             _pending.Remove(h); _handled.Add(h);
 
             var current = MonitorOfWindow(h);
@@ -1847,7 +2560,7 @@ public sealed class Engine : IDisposable
                 continue;
             }
             if (Native.IsHungAppWindow(h)) continue;
-            if (WindowMover.MoveTo(h, target))
+            if (MovePlaced(h, target, place, false, () => true) == WindowMover.Result.Moved)
             {
                 moved++;
                 Log.Write($"Moved open window {app.Key} \"{title}\" from {current?.Name ?? "?"} to {target.Name} (set by you).");
@@ -2009,6 +2722,115 @@ internal static class WindowMover
         KeepInside(hwnd, wa);
         return string.Equals(MonitorService.DeviceOfWindow(hwnd), target.DeviceName, StringComparison.OrdinalIgnoreCase)
             ? Result.Moved : Result.Failed;
+    }
+
+    /// <summary>True if the window has a maximize button.</summary>
+    public static bool CanMaximize(IntPtr hwnd) =>
+        (Native.GetWindowLongPtr(hwnd, Native.GWL_STYLE).ToInt64() & Native.WS_MAXIMIZEBOX) != 0;
+
+    /// <summary>Maximizes a window that can be maximized (it has a maximize button) and isn't yet.</summary>
+    public static void Maximize(IntPtr hwnd)
+    {
+        if (!CanMaximize(hwnd) || Native.IsZoomed(hwnd) || !Responds(hwnd)) return;
+        Native.ShowWindow(hwnd, Native.SW_MAXIMIZE);
+    }
+
+    /// <summary>
+    /// "Where I last had it": puts a window at a remembered spot on the target monitor (fractions of its work area, for
+    /// the visible frame), in the same two steps as <see cref="Move"/> so the app can rescale for that monitor's DPI
+    /// first. A window that can't be resized keeps its size. Stops with <see cref="Result.Aborted"/> if monitors changed.
+    /// </summary>
+    public static Result PlaceAtFraction(IntPtr hwnd, MonitorInfo target, WindowPosition spot, Func<bool>? stillValid)
+    {
+        if (!Responds(hwnd)) return Result.Failed;
+        if (!LiveWorkArea(target, out var wa) || stillValid?.Invoke() == false) return Result.Aborted;
+        if (Native.IsZoomed(hwnd)) Native.ShowWindow(hwnd, Native.SW_RESTORE);
+        if (!Native.GetWindowRect(hwnd, out var r)) return Result.Failed;
+        uint startDpi = Native.GetDpiForWindow(hwnd), targetDpi = MonitorDpi(target);
+
+        // Step 1: only the position, so the app can rescale for that monitor's DPI.
+        var frame = Frame(hwnd, r);
+        int left = wa.Left + (int)Math.Round(spot.X * wa.Width), top = wa.Top + (int)Math.Round(spot.Y * wa.Height);
+        Native.SetWindowPos(hwnd, IntPtr.Zero, left - frame.Left, top - frame.Top, 0, 0, MoveFlags | Native.SWP_NOSIZE);
+        WaitForDpi(hwnd, startDpi, targetDpi);
+
+        // Step 2: the size, measured again (its invisible borders may have been rescaled too), kept fully on the monitor.
+        if (!LiveWorkArea(target, out wa) || stillValid?.Invoke() == false) return Result.Aborted;
+        if (!Native.GetWindowRect(hwnd, out r)) return Result.Failed;
+        frame = Frame(hwnd, r);
+        bool resizable = (Native.GetWindowLongPtr(hwnd, Native.GWL_STYLE).ToInt64() & Native.WS_THICKFRAME) != 0;
+        int vw = resizable ? (int)Math.Round(spot.Width * wa.Width) : r.Width - frame.Left - frame.Right;
+        int vh = resizable ? (int)Math.Round(spot.Height * wa.Height) : r.Height - frame.Top - frame.Bottom;
+        left = wa.Left + (int)Math.Round(spot.X * wa.Width);
+        top = wa.Top + (int)Math.Round(spot.Y * wa.Height);
+        var want = Clamp(Outer(left, top, vw, vh, frame), frame, wa);
+        Native.SetWindowPos(hwnd, IntPtr.Zero, want.Left, want.Top, want.Width, want.Height, MoveFlags);
+        KeepInside(hwnd, wa); // an app with a minimum size: keep it on screen
+        return string.Equals(MonitorService.DeviceOfWindow(hwnd), target.DeviceName, StringComparison.OrdinalIgnoreCase)
+            ? Result.Moved : Result.Failed;
+    }
+
+    /// <summary>
+    /// Where a window is on its monitor, as fractions of the monitor's work area (its visible frame; for a maximized
+    /// window, the size it has when restored). Null if Windows doesn't say.
+    /// </summary>
+    public static WindowPosition? FractionOf(IntPtr hwnd, MonitorInfo m)
+    {
+        if (!LiveWorkArea(m, out var wa) || wa.Width <= 0 || wa.Height <= 0) return null;
+        bool maximized = Native.IsZoomed(hwnd);
+        Native.RECT v;
+        if (maximized)
+        {
+            var wp = new Native.WINDOWPLACEMENT { length = Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
+            if (!Native.GetWindowPlacement(hwnd, ref wp)) return null;
+            v = WorkspaceToScreen(hwnd, wp.rcNormalPosition);
+        }
+        else
+        {
+            if (!Native.GetWindowRect(hwnd, out var r)) return null;
+            var f = Frame(hwnd, r);
+            v = new Native.RECT { Left = r.Left + f.Left, Top = r.Top + f.Top, Right = r.Right - f.Right, Bottom = r.Bottom - f.Bottom };
+        }
+        var p = new WindowPosition
+        {
+            X = (double)(v.Left - wa.Left) / wa.Width, Y = (double)(v.Top - wa.Top) / wa.Height,
+            Width = (double)v.Width / wa.Width, Height = (double)v.Height / wa.Height, Maximized = maximized,
+        };
+        return p.Repair() ? p : null;
+    }
+
+    /// <summary>
+    /// GetWindowPlacement gives "workspace" coordinates: screen coordinates shifted by the taskbar of the window's
+    /// monitor when it's at the top or left.
+    /// </summary>
+    private static Native.RECT WorkspaceToScreen(IntPtr hwnd, Native.RECT r)
+    {
+        IntPtr hMon = Native.MonitorFromWindow(hwnd, Native.MONITOR_DEFAULTTONEAREST);
+        var mi = new Native.MONITORINFOEX { cbSize = Marshal.SizeOf<Native.MONITORINFOEX>() };
+        if (hMon == IntPtr.Zero || !Native.GetMonitorInfo(hMon, ref mi)) return r;
+        int dx = mi.rcWork.Left - mi.rcMonitor.Left, dy = mi.rcWork.Top - mi.rcMonitor.Top;
+        return new Native.RECT { Left = r.Left + dx, Top = r.Top + dy, Right = r.Right + dx, Bottom = r.Bottom + dy };
+    }
+
+    /// <summary>
+    /// Centres a dialog over its app's window on the target monitor, without resizing it, and keeps it fully on that
+    /// monitor's work area. In two steps, like <see cref="Move"/>, so the dialog can rescale for that monitor's DPI.
+    /// </summary>
+    public static bool CenterOver(IntPtr hwnd, IntPtr owner, MonitorInfo target)
+    {
+        if (!Responds(hwnd) || !LiveWorkArea(target, out var wa) || !Native.GetWindowRect(owner, out var o)) return false;
+        uint startDpi = Native.GetDpiForWindow(hwnd), targetDpi = MonitorDpi(target);
+        for (int step = 0; step < 2; step++)
+        {
+            if (!Native.GetWindowRect(hwnd, out var r)) return false;
+            var f = Frame(hwnd, r);
+            int vw = r.Width - f.Left - f.Right, vh = r.Height - f.Top - f.Bottom;
+            int left = Math.Max(wa.Left, Math.Min(o.Left + (o.Width - vw) / 2, wa.Right - vw));
+            int top = Math.Max(wa.Top, Math.Min(o.Top + (o.Height - vh) / 2, wa.Bottom - vh));
+            Native.SetWindowPos(hwnd, IntPtr.Zero, left - f.Left, top - f.Top, 0, 0, MoveFlags | Native.SWP_NOSIZE);
+            if (step == 0) WaitForDpi(hwnd, startDpi, targetDpi);
+        }
+        return string.Equals(MonitorService.DeviceOfWindow(hwnd), target.DeviceName, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

@@ -57,7 +57,8 @@ internal sealed class TrayIcon : IDisposable
         bool on = _engine.Settings.Enabled;
         _enabledItem.Checked = on;
         string tip = !on ? "Monitor Window Control (paused)"
-            : _engine.IsPausedForRemoteDesktop ? "Monitor Window Control (paused: Remote Desktop)" : "Monitor Window Control";
+            : _engine.IsPausedForRemoteDesktop ? "Monitor Window Control (paused: Remote Desktop)"
+            : _engine.IsPausedForGame ? "Monitor Window Control (paused: game running)" : "Monitor Window Control";
         var off = _engine.Monitors.Where(m => m.IsSwitchedOff).Select(m => $"{m.Name}: off").ToList();
         if (off.Count > 0) tip += $" ({string.Join(", ", off)})";
         _icon.Text = tip.Length <= MaxTipLength ? tip : tip[..(MaxTipLength - 1)] + "…";

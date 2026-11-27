@@ -14,6 +14,7 @@ public static class Native
     public const uint EVENT_OBJECT_DESTROY = 0x8001;
     public const uint EVENT_OBJECT_SHOW = 0x8002;
     public const uint EVENT_SYSTEM_MOVESIZEEND = 0x000B; // you finished dragging or resizing a window
+    public const uint EVENT_OBJECT_UNCLOAKED = 0x8018;   // a window that was hidden by Windows (cloaked) became visible
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
     public const int OBJID_WINDOW = 0;
@@ -34,11 +35,14 @@ public static class Native
     public const long WS_CAPTION = 0x00C00000L;
     public const long WS_SYSMENU = 0x00080000L;
     public const long WS_MINIMIZEBOX = 0x00020000L;
+    public const long WS_MAXIMIZEBOX = 0x00010000L;
+    public const long WS_THICKFRAME = 0x00040000L;
     public const long WS_EX_TOOLWINDOW = 0x00000080L;
     public const long WS_EX_APPWINDOW = 0x00040000L;
     public const long WS_EX_NOACTIVATE = 0x08000000L;
 
     public const uint GA_ROOT = 2;
+    public const uint GA_ROOTOWNER = 3;
     public const uint GW_OWNER = 4;
 
     public const int SW_MAXIMIZE = 3;
@@ -128,8 +132,64 @@ public static class Native
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
     [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINDOWPLACEMENT
+    {
+        public int length, flags, showCmd;
+        public POINT ptMinPosition, ptMaxPosition;
+        public RECT rcNormalPosition;
+    }
+
+    public const int SW_SHOWMAXIMIZED = 3;
+
+    /// <summary>The window's normal (restored) position, in workspace coordinates, and whether it's maximized.</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+
+    // ---------- Mouse pointer and last input ----------
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetCursorPos(out POINT lpPoint);
+
+    /// <summary>The desktop window of Explorer (the shell), or 0 when Explorer isn't running.</summary>
+    [DllImport("user32.dll")] public static extern IntPtr GetShellWindow();
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LASTINPUTINFO { public uint cbSize, dwTime; }
+
+    /// <summary>When you last used the keyboard or mouse (dwTime, in GetTickCount milliseconds).</summary>
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+    // ---------- Games and presentations ----------
+    public const int QUNS_RUNNING_D3D_FULL_SCREEN = 3, QUNS_PRESENTATION_MODE = 4;
+
+    /// <summary>What Windows says about notifications right now (a game in fullscreen, presentation mode…).</summary>
+    [DllImport("shell32.dll")] public static extern int SHQueryUserNotificationState(out int state);
+
+    // ---------- Sign-in time ----------
+    public const int WTS_CURRENT_SESSION = -1;
+    public const int WTSSessionInfo = 24;
+    /// <summary>Offsets in WTSINFOW of LogonTime and CurrentTime (FILETIMEs), and the structure's size.</summary>
+    public const int WTSINFO_LogonTime = 200, WTSINFO_CurrentTime = 208, WTSINFO_Size = 216;
+
+    [DllImport("wtsapi32.dll", EntryPoint = "WTSQuerySessionInformationW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool WTSQuerySessionInformation(IntPtr server, int sessionId, int infoClass, out IntPtr buffer, out int bytes);
+
+    [DllImport("wtsapi32.dll")] public static extern void WTSFreeMemory(IntPtr memory);
+
+    // ---------- COM (virtual desktops) ----------
+    public const uint COINIT_APARTMENTTHREADED = 0x2;
+    public const uint CLSCTX_ALL = 0x17;
+
+    [DllImport("ole32.dll")] public static extern int CoInitializeEx(IntPtr reserved, uint coInit);
+
+    [DllImport("ole32.dll")]
+    public static extern int CoCreateInstance(ref Guid clsid, IntPtr outer, uint clsContext, ref Guid iid, out IntPtr instance);
+
     // ---------- DWM ----------
     public const int DWMWA_CLOAKED = 14;
+    /// <summary>DWMWA_CLOAKED reason: the shell hides it, which means it's on another virtual desktop.</summary>
+    public const int DWM_CLOAKED_SHELL = 0x2;
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);

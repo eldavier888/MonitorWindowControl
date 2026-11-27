@@ -79,6 +79,21 @@ public sealed class AppRule
     public string? Fallback { get; set; }
     /// <summary>The monitor for <see cref="FallbackModes.Monitor"/>.</summary>
     public MonitorRef? FallbackMonitor { get; set; }
+    /// <summary>
+    /// User chose "The monitor I'm using (mouse pointer)": new windows open on the monitor with the mouse pointer, but
+    /// only on one of <see cref="AllowedMonitors"/> (empty = any monitor). Learning never changes it.
+    /// </summary>
+    public bool FollowMouse { get; set; }
+    /// <summary>"Place it": null = centered (what older versions always did), or one of <see cref="PlaceModes"/>.</summary>
+    public string? Place { get; set; }
+    /// <summary>For "Where I last had it": where its window was on each monitor, as fractions of that monitor's work area.</summary>
+    public List<WindowPosition> Positions { get; set; } = new();
+    /// <summary>Advanced: "Wait before moving", in milliseconds (null = automatic). See <see cref="AppTimings"/>.</summary>
+    public int? WaitMs { get; set; }
+    /// <summary>Advanced: "Keep correcting for", in milliseconds (null = 1 second). See <see cref="AppTimings"/>.</summary>
+    public int? CorrectForMs { get; set; }
+    /// <summary>The app moved itself back twice in a row after being moved: the Apps page suggests a longer wait.</summary>
+    public bool MovedItselfBack { get; set; }
     /// <summary>How to start the app for launch-only shortcuts: "exe:C:\...\app.exe" or "aumid:Package!App". Null = unknown yet.</summary>
     public string? LaunchTarget { get; set; }
     /// <summary>File name (without .lnk) of this app's launch shortcut, fixed when it was created. Null = none made.</summary>
@@ -155,6 +170,49 @@ public sealed class MonitorOptions
     public bool IsEmpty => Temporary == null && !Off && !OnlyChosenApps;
 }
 
+/// <summary>
+/// Where an app's window was on one monitor ("Where I last had it"): its visible frame as fractions (0 to 1) of that
+/// monitor's work area, so it fits again when the monitor's resolution or scale changes.
+/// </summary>
+public sealed class WindowPosition
+{
+    public MonitorRef Monitor { get; set; } = new();
+    public double X { get; set; }
+    public double Y { get; set; }
+    public double Width { get; set; }
+    public double Height { get; set; }
+    public bool Maximized { get; set; }
+
+    /// <summary>Puts impossible values (hand-edited files) back in range. False if nothing usable is left.</summary>
+    public bool Repair()
+    {
+        static double Fix(double v, double min) => double.IsFinite(v) ? Math.Clamp(v, min, 1) : -1;
+        X = Fix(X, 0); Y = Fix(Y, 0); Width = Fix(Width, 0.02); Height = Fix(Height, 0.02);
+        return X >= 0 && Y >= 0 && Width > 0 && Height > 0;
+    }
+}
+
+/// <summary>"Place it": where on its monitor an app's new window goes (see <see cref="AppRule.Place"/>).</summary>
+public static class PlaceModes
+{
+    /// <summary>Where I last had it on that monitor (centered until it's known).</summary>
+    public const string Last = "Last";
+    /// <summary>Maximized.</summary>
+    public const string Maximized = "Maximized";
+
+    /// <summary>A known mode, or null (centered) for anything else.</summary>
+    public static string? Normalize(string? mode) => mode is Last or Maximized ? mode : null;
+}
+
+/// <summary>The Advanced timing choices for stubborn apps (see <see cref="AppRule.WaitMs"/>).</summary>
+public static class AppTimings
+{
+    /// <summary>"Wait before moving": 1 s or 3 s (null = automatic, about 0.4 s).</summary>
+    public static int? NormalizeWait(int? ms) => ms is 1000 or 3000 ? ms : null;
+    /// <summary>"Keep correcting for": 5 s (null = 1 s).</summary>
+    public static int? NormalizeCorrect(int? ms) => ms is 5000 ? ms : null;
+}
+
 /// <summary>Where an app opens while its own monitor is off or disconnected (see <see cref="AppRule.Fallback"/>).</summary>
 public static class FallbackModes
 {
@@ -185,6 +243,17 @@ public sealed class AppSettings
     public bool LearnAutomatically { get; set; } = true;
     /// <summary>true = apps it hasn't learned yet open on the main monitor; false = leave them.</summary>
     public bool MoveUnknownToMain { get; set; } = true;
+    /// <summary>
+    /// true = apps it hasn't learned yet open on the monitor with the mouse pointer (then <see cref="MoveUnknownToMain"/>
+    /// is also true, so an older version opens them on the main monitor).
+    /// </summary>
+    public bool UnknownFollowMouse { get; set; }
+    /// <summary>"Open dialogs on the same monitor as their app".</summary>
+    public bool MoveDialogsWithApp { get; set; } = true;
+    /// <summary>"Pause while a game or presentation is running".</summary>
+    public bool PauseForGames { get; set; } = true;
+    /// <summary>"Also place apps that opened while signing in" (apps that start with Windows before this app does).</summary>
+    public bool PlaceAppsOpenedAtSignIn { get; set; } = true;
     /// <summary>How it runs in the background: see <see cref="RunModes"/>.</summary>
     public string RunMode { get; set; } = RunModes.Tray;
     /// <summary>Start with Windows (null = not decided yet; older versions kept this only in the registry).</summary>
@@ -224,6 +293,7 @@ public sealed class AppSettings
 [JsonSerializable(typeof(AppSettings))]
 [JsonSerializable(typeof(MonitorHardware))]
 [JsonSerializable(typeof(MonitorOptions))]
+[JsonSerializable(typeof(WindowPosition))]
 internal partial class SettingsJson : JsonSerializerContext { }
 
 /// <summary>
@@ -346,7 +416,15 @@ public static class SettingsStore
             foreach (var m in a.AllowedMonitors) CleanRef(m);
             a.MonitorHardware = MonitorHardware.Clean(a.MonitorHardware);
             (a.Fallback, a.FallbackMonitor) = CleanFallback(a.Fallback, a.FallbackMonitor);
+            a.Place = PlaceModes.Normalize(a.Place);
+            a.Positions ??= new();
+            a.Positions.RemoveAll(p => p == null || p.Monitor == null || !p.Repair());
+            foreach (var p in a.Positions) CleanRef(p.Monitor);
+            a.WaitMs = AppTimings.NormalizeWait(a.WaitMs);
+            a.CorrectForMs = AppTimings.NormalizeCorrect(a.CorrectForMs);
+            if (a.FollowMouse && (a.NeverMove || a.FollowLastUsed)) a.FollowMouse = false; // one choice only
         }
+        if (s.UnknownFollowMouse) s.MoveUnknownToMain = true;
         s.MonitorNicknames ??= new();
         s.MonitorNicknames.RemoveAll(n => n == null || n.Monitor == null);
         foreach (var n in s.MonitorNicknames) { CleanRef(n.Monitor); n.Nickname ??= ""; }

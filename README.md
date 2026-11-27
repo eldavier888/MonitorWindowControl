@@ -40,7 +40,10 @@ which monitor an app's new windows should open on.
 2. Double-click it and its window opens. When you close the window it keeps working in the tray
    (look for the blue monitor-with-a-house icon; it may be under the **^** arrow next to the clock).
    You don't need to set anything: just use your apps, and each one is learned after a few seconds on a monitor.
-3. To have it start when you sign in, turn on **Start with Windows** in its window.
+3. To have it start when you sign in, turn on **Start with Windows** in its window. Apps that start with Windows too
+   (a chat or music app, for example) often open before Monitor Window Control does: with **Also place apps that opened
+   while signing in** (on by default), their windows are moved to their monitors right after you sign in. Windows you've
+   already started using are left alone, and it never happens when you just restart Monitor Window Control later on.
 
 Coming from the earlier AutoHotkey version (it was called WindowHome)? Put its `WindowHome.ini` in the **same folder as MonitorWindowControl.exe**
 before the very first run, and Monitor Window Control imports it (homes, pinned apps, "never move" apps, and settings).
@@ -82,7 +85,14 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
 - **While connected with Remote Desktop**: when you use this PC from another one, the other PC's monitors replace
   yours, so by default Monitor Window Control pauses until you're back (**Pause**). Choose **Keep moving windows**
   if you want windows placed anyway; learning still pauses.
-- **Apps it hasn't learned yet**: open them on the main monitor, or leave them where Windows puts them.
+- **Apps it hasn't learned yet**: open them on the main monitor, on the monitor with the mouse pointer, or leave them where Windows puts them.
+- **Open dialogs on the same monitor as their app** (on by default): a Save, Print or Settings window that opens on
+  another monitor than its app moves over the app's window. It's never resized. Large windows, windows that are partly on
+  the app's monitor already, and dialogs of apps set to *Never move* are left alone.
+- **Pause while a game or presentation is running** (on by default): while a game or any other app runs fullscreen, or
+  Windows is in presentation mode, no window is moved and nothing is learned. Windows that open meanwhile are placed when it
+  ends, unless you've switched to them (or they've waited more than 15 minutes). The General page and the tray icon say
+  when it's paused.
 - **When an app's monitor is off**: where apps open while their own monitor is disconnected or switched off: the main
   monitor (default), another monitor you choose, or where Windows puts them. Each app can have its own choice too (Apps page).
 - **When a monitor comes back** (TV switched on again, waking from sleep, a dock reconnected): windows that opened on
@@ -132,7 +142,20 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
   - **Where I used it last…**: tick the monitors it may use (for example the side monitor and the TV). It opens on
     whichever of those you used it on most recently. If that one is off, it opens on the next one in the list: use the
     up and down arrows next to each monitor to set the order;
+  - **The monitor I'm using (mouse pointer)…**: it opens on the monitor with the mouse pointer when it starts (if you
+    use only the keyboard and the pointer hasn't moved for a couple of minutes, the monitor of the window you're using).
+    Tick the monitors it may use, so it never opens on the TV by accident; if the pointer is on another one, it opens on
+    the first ticked monitor in the list;
   - **Never move this app**: leave it alone.
+
+  **Place it**: where on its monitor the window goes: **Centered** (the default), **Where I last had it** (remembered
+  for each monitor as you use the app, as a share of the monitor, so it still fits when the resolution or scale changes;
+  **Reset** forgets it), or **Maximized**. It's applied once when the window opens, never enforced.
+
+  **Advanced** (for stubborn apps that show a splash screen first or move themselves back): **Wait before moving**
+  (Automatic, 1 second or 3 seconds) and **Keep correcting for** (1 second, or 5 seconds: if the app moves its window back
+  to where it opened during that time, it's moved again, at most 3 times). When an app moves itself back twice in a row,
+  the log says so and its row on the Apps page shows an info icon suggesting a longer wait.
 
   **If it's off, open on**: where this app opens while its monitor is disconnected or switched off: the same as other
   apps (the General page's choice, the default), the main monitor, another monitor (for example the side monitor for a
@@ -149,20 +172,24 @@ right after opening):
 | The app is... | Monitor Window Control... |
 |---|---|
 | learned or set by you | moves it to that monitor. If that monitor is disconnected, switched off, or kept for other apps: to the app's *If it's off, open on* choice, else to the General page's choice, else the main monitor (never to a temporary monitor), and back to its own monitor when that one can be used again |
+| set to "The monitor I'm using" | moves it to the monitor with the mouse pointer, if that's one you ticked; otherwise to the first one you ticked |
 | set to "Where I used it last" | moves it to the monitor (of the ones you ticked) where you last used it. If that one is off, to the next one you ticked, in your order (then as above); if you never used it yet, leaves it |
 | set to "Never move" | leaves it alone |
-| not known yet | moves it to the main monitor (or leaves it, per your setting) |
+| not known yet | moves it to the main monitor (or the mouse pointer's monitor, or leaves it, per your setting) |
 
 A window that would be left where Windows puts it is still moved off a monitor that's switched off or kept for other
 apps (except apps set to "Never move").
 
 Each window is handled once. If you move it somewhere else afterwards, Monitor Window Control won't move it back.
-(It only corrects an app that jumps straight back to where it opened, within the first second.)
+(It only corrects an app that jumps straight back to where it opened, within the first second, or the first 5 seconds if you chose that under Advanced.)
 While monitors are changing (a TV switching on, waking from sleep, a dock reconnecting), new windows wait until
 things have settled, up to 3 seconds, so they don't land on a monitor that's going away. A moved window is
-centred on its monitor with its visible edges (not its invisible resize borders) fully on screen, and it's sized
+centred on its monitor (unless you chose otherwise under *Place it*) with its visible edges (not its invisible resize borders) fully on screen, and it's sized
 again after it adapts to a monitor with a different scale (for example a TV at 200 % next to a monitor at 100 %).
-Minimized, fullscreen and not-responding windows are skipped. Store apps (Calculator…) all run inside one
+Minimized, fullscreen and not-responding windows are skipped. A window that Windows shows a little later (Store apps
+while you sign in, apps with a splash screen) is still placed if it appears within 30 seconds; windows on another virtual
+desktop are placed when you switch to that desktop, if that's within 30 seconds of them opening. Switching desktops never
+moves windows that were already open, and the Apps list and learning ignore windows on other desktops. Store apps (Calculator…) all run inside one
 Windows process, so they're told apart by window title and shown as "(Store app)". Web apps installed from a
 browser (Netflix, Disney+, Prime Video, Crave… in Edge or Chrome) are recognised as their own apps and shown as "Web app".
 Windows that run as administrator can't be moved by a normal app; Monitor Window Control skips them and notes it in the log.
@@ -175,7 +202,8 @@ Windows that run as administrator can't be moved by a normal app; Monitor Window
 - `monitorwindowcontrol.log`: the activity log (kept to about 1 MB).
 
 The tiny helper is unpacked to `%LocalAppData%\MonitorWindowControl\MonitorWindowControlHelper.exe` when a mode
-or shortcut needs it.
+or shortcut needs it. Next to it, `signin.txt` only notes when you last signed in, so apps that opened while signing in
+are placed once per sign-in.
 
 To start completely fresh: in the window, press **Forget all…** (this also deletes your launch shortcuts), turn off
 **Start with Windows**, set **How it runs** to the tray, and press **Exit**. Then delete those two folders and
