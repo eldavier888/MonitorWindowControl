@@ -203,9 +203,16 @@ public partial class MainWindow : FluentWindow
     /// </summary>
     private void FitAppsList()
     {
-        double room = PageScroller.ViewportHeight - 270;          // title, tip, search box, column headers
-        if (_wide != true) room -= 300;                            // the options card below the list
-        AppsList.MaxHeight = Math.Max(220, room);
+        // Measure after layout: fill from where the list starts down to the bottom of the window.
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (PageApps.Visibility != Visibility.Visible || !AppsList.IsVisible) return;
+            double top = AppsList.TranslatePoint(new Point(0, 0), PageScroller).Y + PageScroller.VerticalOffset;
+            double room = PageScroller.ViewportHeight - top - 16;
+            if (_wide != true) room -= SelectionPanel.ActualHeight + 24;  // the options card below the list
+            double h = Math.Max(220, room);
+            if (Math.Abs(AppsList.MaxHeight - h) > 1) AppsList.MaxHeight = h;
+        }, System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
     /// <summary>A closed drop-down never changes its value when you scroll the page over it: the page scrolls instead.</summary>
@@ -222,6 +229,7 @@ public partial class MainWindow : FluentWindow
         PageGeneral.Visibility = page == "General" ? Visibility.Visible : Visibility.Collapsed;
         PageMonitors.Visibility = page == "Monitors" ? Visibility.Visible : Visibility.Collapsed;
         PageApps.Visibility = page == "Apps" ? Visibility.Visible : Visibility.Collapsed;
+        if (page == "Apps") FitAppsList();
         PageAbout.Visibility = page == "About" ? Visibility.Visible : Visibility.Collapsed;
         PageScroller.ScrollToTop();
         IdentifyOverlay.HideOutline();
