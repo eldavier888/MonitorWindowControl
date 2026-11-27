@@ -31,6 +31,9 @@ public interface IEngineHost
 
     /// <summary>Removes a keyboard shortcut registered with <see cref="RegisterHotKey"/>.</summary>
     void UnregisterHotKey(int id);
+
+    /// <summary>Runs an action on the engine's thread soon (safe to call from any thread).</summary>
+    void Post(Action action);
 }
 
 /// <summary>How Monitor Window Control runs in the background.</summary>

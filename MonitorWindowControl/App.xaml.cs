@@ -119,7 +119,8 @@ public partial class App : Application
         {
             HelperManager.Stop(); // it would otherwise also place windows
             TryActivate();
-            _tray ??= new TrayIcon(_engine, ShowMainWindow, ExitApp, ShowApp, OnUndoneFromTray, IdentifyMonitors);
+            _tray ??= new TrayIcon(_engine, ShowMainWindow, ExitApp, ShowApp, OnUndoneFromTray, IdentifyMonitors,
+                                   DisconnectFromTray, ConnectFromTray, OpenGroupFromTray);
         }
         else
         {
@@ -235,7 +236,7 @@ public partial class App : Application
         if (_engine == null) return;
         bool? keep = await Uninstaller.AskAsync();
         if (keep == null || _engine == null) return;
-        Uninstaller.Remove(keep.Value, _engine.Settings.Apps.ToList());
+        Uninstaller.Remove(keep.Value, _engine.Settings.Apps.ToList(), _engine.Settings.Groups.ToList());
         ExitApp();
     }
 
@@ -328,6 +329,26 @@ public partial class App : Application
     private void IdentifyMonitors()
     {
         if (_engine != null) IdentifyOverlay.ShowLabels(_engine.Monitors);
+    }
+
+    /// <summary>Tray menu → Monitors → Disconnect from Windows: the window asks first, then offers to keep it.</summary>
+    private async void DisconnectFromTray(MonitorInfo m)
+    {
+        ShowMainWindow();
+        if (_window != null) await _window.DisconnectMonitorAsync(m);
+    }
+
+    /// <summary>Tray menu → Monitors → Connect: the window offers to keep it afterwards.</summary>
+    private async void ConnectFromTray(DisplayTopology.Disconnected d)
+    {
+        ShowMainWindow();
+        if (_window != null) await _window.ConnectMonitorAsync(d);
+    }
+
+    /// <summary>Tray menu → Open a group: starts the group's apps (a problem shows as a notification).</summary>
+    private void OpenGroupFromTray(AppGroup group)
+    {
+        if (HelperManager.OpenGroup(group) is string error) _tray?.ShowBalloon($"Couldn't open {group.Name}", error);
     }
 
     /// <summary>Tray menu → More choices…: the window's Apps page with that app selected.</summary>

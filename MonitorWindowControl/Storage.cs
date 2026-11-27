@@ -98,7 +98,134 @@ public sealed class AppRule
     public string? LaunchTarget { get; set; }
     /// <summary>File name (without .lnk) of this app's launch shortcut, fixed when it was created. Null = none made.</summary>
     public string? ShortcutFile { get; set; }
+    /// <summary>
+    /// File names (without .lnk) of this app's other launch shortcuts: ones that open it on a chosen monitor, or with a
+    /// web address or file ("Netflix on 3 · TV").
+    /// </summary>
+    public List<string> MoreShortcuts { get; set; } = new();
+    /// <summary>"Rules for some of its windows": checked, in order, before the app's own choice.</summary>
+    public List<WindowRule> WindowRules { get; set; } = new();
     public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>
+/// A rule for some of an app's windows: windows whose title (or, in Chrome and Edge, browser profile) matches open on
+/// their own monitor, or are never moved. Learning never changes it.
+/// </summary>
+public sealed class WindowRule
+{
+    /// <summary>What's compared: one of <see cref="WindowMatches"/>.</summary>
+    public string Match { get; set; } = WindowMatches.TitleContains;
+    /// <summary>The text the window title contains, starts with or is; or the browser profile's id. Case doesn't matter.</summary>
+    public string Text { get; set; } = "";
+    /// <summary>The monitor these windows open on (null when <see cref="NeverMove"/>).</summary>
+    public MonitorRef? Monitor { get; set; }
+    /// <summary>These windows are never moved.</summary>
+    public bool NeverMove { get; set; }
+
+    /// <summary>Does a window with this title and browser profile (null = not a browser window) match?</summary>
+    public bool Matches(string title, string? profile)
+    {
+        if (Text.Length == 0) return false;
+        return Match switch
+        {
+            WindowMatches.TitleStartsWith => title.StartsWith(Text, StringComparison.CurrentCultureIgnoreCase),
+            WindowMatches.TitleIs => string.Equals(title.Trim(), Text, StringComparison.CurrentCultureIgnoreCase),
+            WindowMatches.Profile => profile != null && string.Equals(profile, Text, StringComparison.OrdinalIgnoreCase),
+            _ => title.Contains(Text, StringComparison.CurrentCultureIgnoreCase),
+        };
+    }
+}
+
+/// <summary>How a <see cref="WindowRule"/> picks windows. Plain text only, never patterns.</summary>
+public static class WindowMatches
+{
+    public const string TitleContains = "contains";
+    public const string TitleStartsWith = "starts";
+    public const string TitleIs = "is";
+    public const string Profile = "profile";
+
+    public static bool IsKnown(string? m) => m is TitleContains or TitleStartsWith or TitleIs or Profile;
+}
+
+/// <summary>
+/// A set of connected monitors seen before ("Your setups" on the Monitors page): named by the model of each monitor,
+/// so the same monitors at home and at work count as the same setup. Apps can have their own monitor in a setup that
+/// isn't the usual one.
+/// </summary>
+public sealed class MonitorSetup
+{
+    /// <summary>The sorted model ids of its monitors, joined (see Engine.SetupIdOf).</summary>
+    public string Id { get; set; } = "";
+    /// <summary>Your own name for it ("Home", "Laptop only"); null = "3 monitors".</summary>
+    public string? Name { get; set; }
+    /// <summary>Its monitors' model names when it was last seen, to describe it.</summary>
+    public List<string> Monitors { get; set; } = new();
+    public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
+    /// <summary>Apps that open on another monitor than usual while this setup is connected.</summary>
+    public List<SetupHome> Homes { get; set; } = new();
+}
+
+/// <summary>Where one app opens while a <see cref="MonitorSetup"/> is connected.</summary>
+public sealed class SetupHome
+{
+    public string Key { get; set; } = "";
+    public MonitorRef Monitor { get; set; } = new();
+    /// <summary>Set by you (learning never changes it).</summary>
+    public bool Pinned { get; set; }
+}
+
+/// <summary>"App groups": a set of saved apps opened together, each on its own monitor (or the one chosen here).</summary>
+public sealed class AppGroup
+{
+    /// <summary>A fixed id (for its shortcut and the tray menu), independent of its name.</summary>
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public List<GroupApp> Apps { get; set; } = new();
+    /// <summary>File name (without .lnk) of the group's launch shortcut. Null = none made.</summary>
+    public string? ShortcutFile { get; set; }
+}
+
+/// <summary>One app in an <see cref="AppGroup"/>.</summary>
+public sealed class GroupApp
+{
+    public string Key { get; set; } = "";
+    /// <summary>Open it on this monitor when the group opens; null = its usual monitor.</summary>
+    public MonitorRef? Monitor { get; set; }
+}
+
+/// <summary>
+/// From a launch shortcut or group to the program that places windows: open these apps' next windows on these
+/// monitors, this once (written to launch.json, see <see cref="HelperChannel.LaunchEventName"/>).
+/// </summary>
+public sealed class LaunchRequest
+{
+    public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
+    public List<LaunchItem> Items { get; set; } = new();
+}
+
+/// <summary>"Open with" of a launch shortcut: a web address or a file, checked the same way where it's made and where it's used.</summary>
+public static class LaunchOpen
+{
+    /// <summary>
+    /// The trimmed text if it's a web address (http or https) or a full path to a file or folder, without quotes or
+    /// control characters (it becomes one quoted argument on a command line); else null.
+    /// </summary>
+    public static string? Clean(string? text)
+    {
+        string s = text?.Trim() ?? "";
+        if (s.Length == 0 || s.Length > 2000 || s.Any(c => char.IsControl(c) || c == '"')) return null;
+        if (Uri.TryCreate(s, UriKind.Absolute, out var u) && (u.Scheme == Uri.UriSchemeHttp || u.Scheme == Uri.UriSchemeHttps)) return s;
+        if (!Path.IsPathFullyQualified(s)) return null;
+        return s.EndsWith('\\') ? s + "." : s; // (a backslash before the closing quote would escape it)
+    }
+}
+
+/// <summary>One app of a <see cref="LaunchRequest"/>.</summary>
+public sealed class LaunchItem
+{
+    public string Key { get; set; } = "";
+    public MonitorRef Monitor { get; set; } = new();
 }
 
 /// <summary>A saved reference to a monitor: device name plus model name (in case Windows renumbers displays).</summary>
@@ -421,6 +548,18 @@ public static class HelperChannel
     public static HelperReply? ReadReply() =>
         Read(ReplyFile) is string json ? Try(() => JsonSerializer.Deserialize(json, SettingsJson.Default.HelperReply)) : null;
 
+    /// <summary>
+    /// Signalled by a launch shortcut (or group) that opens an app on a chosen monitor while the tray app or background
+    /// helper places windows: it reads <see cref="ReadLaunch"/> then, once (nothing polls the file).
+    /// </summary>
+    public const string LaunchEventName = @"Local\MonitorWindowControl.LaunchOnce";
+    private static string LaunchFile => Path.Combine(Paths.HelperDir, "launch.json");
+
+    public static bool WriteLaunch(LaunchRequest r) => Write(LaunchFile, JsonSerializer.Serialize(r, SettingsJson.Default.LaunchRequest));
+
+    public static LaunchRequest? ReadLaunch() =>
+        Read(LaunchFile) is string json ? Try(() => JsonSerializer.Deserialize(json, SettingsJson.Default.LaunchRequest)) : null;
+
     private static T? Try<T>(Func<T?> f) where T : class
     {
         try { return f(); } catch (Exception) { return null; }
@@ -511,6 +650,12 @@ public sealed class AppSettings
     public HotKeySettings HotKeys { get; set; } = new();
     /// <summary>"Notifications" (all off by default).</summary>
     public NoticeSettings Notices { get; set; } = new();
+    /// <summary>The monitor setups seen so far (see <see cref="MonitorSetup"/>).</summary>
+    public List<MonitorSetup> Setups { get; set; } = new();
+    /// <summary>The id of the usual setup: there, apps use their own choice; other setups can have their own monitors.</summary>
+    public string? UsualSetup { get; set; }
+    /// <summary>"App groups" (Apps page).</summary>
+    public List<AppGroup> Groups { get; set; } = new();
     /// <summary>
     /// Only in a file made with "Export settings": the main monitor of the PC it came from, so "Import settings" can
     /// match it to this PC's main monitor. Never written to settings.json itself.
@@ -535,6 +680,13 @@ public sealed class AppSettings
 [JsonSerializable(typeof(ActivityEntry))]
 [JsonSerializable(typeof(HelperRequest))]
 [JsonSerializable(typeof(HelperReply))]
+[JsonSerializable(typeof(WindowRule))]
+[JsonSerializable(typeof(MonitorSetup))]
+[JsonSerializable(typeof(SetupHome))]
+[JsonSerializable(typeof(AppGroup))]
+[JsonSerializable(typeof(GroupApp))]
+[JsonSerializable(typeof(LaunchRequest))]
+[JsonSerializable(typeof(LaunchItem))]
 internal partial class SettingsJson : JsonSerializerContext { }
 
 /// <summary>
@@ -664,7 +816,12 @@ public static class SettingsStore
             a.WaitMs = AppTimings.NormalizeWait(a.WaitMs);
             a.CorrectForMs = AppTimings.NormalizeCorrect(a.CorrectForMs);
             if (a.FollowMouse && (a.NeverMove || a.FollowLastUsed)) a.FollowMouse = false; // one choice only
+            a.MoreShortcuts ??= new();
+            a.MoreShortcuts.RemoveAll(string.IsNullOrWhiteSpace);
+            CleanWindowRules(a);
         }
+        CleanSetups(s);
+        CleanGroups(s);
         if (s.UnknownFollowMouse) s.MoveUnknownToMain = true;
         s.MonitorNicknames ??= new();
         s.MonitorNicknames.RemoveAll(n => n == null || n.Monitor == null);
@@ -685,6 +842,58 @@ public static class SettingsStore
         if (s.ExportedMainMonitor != null) CleanRef(s.ExportedMainMonitor);
         s.Notices ??= new();
         CleanHotKeys(s.HotKeys ??= new());
+    }
+
+    /// <summary>Rules for some windows: drops unknown kinds, empty texts and rules without a monitor that aren't "never move".</summary>
+    private static void CleanWindowRules(AppRule a)
+    {
+        a.WindowRules ??= new();
+        a.WindowRules.RemoveAll(w => w == null || !WindowMatches.IsKnown(w.Match) || string.IsNullOrWhiteSpace(w.Text)
+                                     || (!w.NeverMove && w.Monitor == null));
+        foreach (var w in a.WindowRules)
+        {
+            w.Text = w.Text.Trim();
+            if (w.NeverMove) w.Monitor = null;
+            else CleanRef(w.Monitor!);
+        }
+    }
+
+    /// <summary>Monitor setups: drops entries without an id, duplicates, and homes without an app or monitor.</summary>
+    private static void CleanSetups(AppSettings s)
+    {
+        s.Setups ??= new();
+        s.Setups.RemoveAll(x => x == null || string.IsNullOrWhiteSpace(x.Id));
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        s.Setups.RemoveAll(x => !seen.Add(x.Id));
+        foreach (var x in s.Setups)
+        {
+            x.Monitors ??= new();
+            x.Monitors.RemoveAll(m => m == null);
+            if (string.IsNullOrWhiteSpace(x.Name)) x.Name = null;
+            x.Homes ??= new();
+            x.Homes.RemoveAll(h => h == null || string.IsNullOrWhiteSpace(h.Key) || h.Monitor == null);
+            var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            x.Homes.RemoveAll(h => !keys.Add(h.Key));
+            foreach (var h in x.Homes) CleanRef(h.Monitor);
+        }
+        if (s.UsualSetup != null && !s.Setups.Any(x => x.Id == s.UsualSetup)) s.UsualSetup = s.Setups.FirstOrDefault()?.Id;
+    }
+
+    /// <summary>App groups: drops groups without an id or name, and apps without a key (each app once per group).</summary>
+    private static void CleanGroups(AppSettings s)
+    {
+        s.Groups ??= new();
+        s.Groups.RemoveAll(g => g == null || string.IsNullOrWhiteSpace(g.Id) || string.IsNullOrWhiteSpace(g.Name));
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        s.Groups.RemoveAll(g => !ids.Add(g.Id));
+        foreach (var g in s.Groups)
+        {
+            g.Apps ??= new();
+            g.Apps.RemoveAll(a => a == null || string.IsNullOrWhiteSpace(a.Key));
+            var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            g.Apps.RemoveAll(a => !keys.Add(a.Key));
+            foreach (var a in g.Apps) if (a.Monitor != null) CleanRef(a.Monitor);
+        }
     }
 
     /// <summary>Keyboard shortcuts: drops unknown actions, duplicates and keys that can't be a shortcut (they get their default again).</summary>

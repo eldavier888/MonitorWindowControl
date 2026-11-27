@@ -47,6 +47,7 @@
     <Compile Include="..\MonitorWindowControl\WindowInfo.cs" Link="Shared\WindowInfo.cs" />
     <Compile Include="..\MonitorWindowControl\Storage.cs" Link="Shared\Storage.cs" />
     <Compile Include="..\MonitorWindowControl\Engine.cs" Link="Shared\Engine.cs" />
+    <Compile Include="..\MonitorWindowControl\Engine.Rules.cs" Link="Shared\Engine.Rules.cs" />
     <Compile Include="..\MonitorWindowControl\Host.cs" Link="Shared\Host.cs" />
     <Compile Include="..\MonitorWindowControl\Policy.cs" Link="Shared\Policy.cs" />
     <Compile Include="..\MonitorWindowControl\CrashReports.cs" Link="Shared\CrashReports.cs" />

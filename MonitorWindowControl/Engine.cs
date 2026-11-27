@@ -13,7 +13,7 @@ namespace MonitorWindowControl;
 /// from the foreground window. Everything runs on the host's thread (see <see cref="IEngineHost"/>).
 /// The same engine runs in the settings app (tray mode) and in the tiny helper.
 /// </summary>
-public sealed class Engine : IDisposable
+public sealed partial class Engine : IDisposable
 {
     /// <summary>Held by whichever process is currently watching windows, so two never move the same window.</summary>
     public const string ActiveMutexName = @"Local\MonitorWindowControl.Active";
@@ -195,8 +195,11 @@ public sealed class Engine : IDisposable
     /// <summary>True while this engine watches for new windows (see <see cref="Activate"/>).</summary>
     public bool IsActive => _hook != IntPtr.Zero;
 
-    /// <summary>Launch-only sessions: only windows of this app are placed (null = all apps).</summary>
-    public string? OnlyAppKey { get; set; }
+    /// <summary>Launch shortcut and group sessions: only windows of these apps are placed (null = all apps).</summary>
+    public HashSet<string>? OnlyAppKeys { get; set; }
+
+    /// <summary>Are this app's windows placed by this engine (see <see cref="OnlyAppKeys"/>)?</summary>
+    private bool PlacesApp(string key) => OnlyAppKeys == null || OnlyAppKeys.Contains(key);
 
     /// <summary>Raised (on the engine thread) when settings, rules or monitors change.</summary>
     public event Action? Changed;
@@ -324,6 +327,7 @@ public sealed class Engine : IDisposable
         Log.Write($"{who} started (mode={Settings.RunMode}, enabled={Settings.Enabled}, learn={Settings.LearnAutomatically}, " +
                   $"unknown apps={(Settings.MoveUnknownToMain ? "main monitor" : "leave")}, admin={_selfElevated}).");
         BackfillIdentity();
+        if (Settings.UsualSetup == null) NoteSetup(force: true); // (the setup you use now is the usual one)
         _wasRemote = IsRemoteSession;
         if (_wasRemote == true) Log.Write(RemoteMessage(true));
         return !existed;
@@ -356,7 +360,7 @@ public sealed class Engine : IDisposable
             if (Native.IsWindowVisible(h)) _handled.Add(h);
         Native.GetCursorPos(out _lastCursor);
         _lastCursorMoveUtc = DateTime.UtcNow;
-        if (claimActive && learn && OnlyAppKey == null) QueueSignInWindows();
+        if (claimActive && learn && OnlyAppKeys == null) QueueSignInWindows();
 
         _hook = Native.SetWinEventHook(Native.EVENT_OBJECT_DESTROY, Native.EVENT_OBJECT_SHOW, IntPtr.Zero,
             _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
@@ -386,6 +390,7 @@ public sealed class Engine : IDisposable
                 _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
             NoteForeground(Native.GetForegroundWindow());
             UpdateHotKeys();
+            ListenForLaunches(); // launch shortcuts that open an app on a chosen monitor
         }
         return true;
     }
@@ -399,6 +404,7 @@ public sealed class Engine : IDisposable
         if (_uncloakHook != IntPtr.Zero) { Native.UnhookWinEvent(_uncloakHook); _uncloakHook = IntPtr.Zero; }
         if (_foregroundHook != IntPtr.Zero) { Native.UnhookWinEvent(_foregroundHook); _foregroundHook = IntPtr.Zero; }
         UnregisterHotKeys();
+        StopListeningForLaunches();
         _movedByYou.Clear(); _rescueDue = false; _lastAppWindow = IntPtr.Zero;
         _pending.Clear(); _handled.Clear(); _appWindows.Clear(); _displaced.Clear(); ResetStreak();
         _cloakedNew.Clear(); _signInWindows.Clear(); _signInPlaced.Clear(); _heldForGame.Clear(); _gamePaused = false;
@@ -628,6 +634,7 @@ public sealed class Engine : IDisposable
         list = list.OrderBy(m => m.Number ?? int.MaxValue).ThenByDescending(m => m.IsPrimary).ThenBy(m => m.Bounds.Left).ToList();
         _monitors = list;
         foreach (var m in list) m.IdentityNote = IdentityNote(m);
+        UpdateSetupId(list);
 
         string layout = MonitorService.LayoutSignature(list);
         if (layout != _layoutSignature)
@@ -1035,13 +1042,15 @@ public sealed class Engine : IDisposable
             if (p.GiveUp < p.Due.AddMilliseconds(GiveUpMs)) p.GiveUp = p.Due.AddMilliseconds(GiveUpMs);
             return;
         }
+        // Rules for some of its windows: its title may not be final yet.
+        if (WaitForTitle(rule, hwnd, p.FirstSeen, now)) { p.Due = now.AddMilliseconds(RetryMs); return; }
 
         // A real app window: handle it exactly once.
         _pending.Remove(hwnd);
         _handled.Add(hwnd);
         if (_appWindows.Add(hwnd)) AppWindowsChanged?.Invoke();
         if (!Settings.Enabled || IsPausedForRemoteDesktop || app == null) return;
-        if (OnlyAppKey != null && !string.Equals(app.Key, OnlyAppKey, StringComparison.OrdinalIgnoreCase)) return;
+        if (!PlacesApp(app.Key)) return;
         if (UpdateGamePause())
         {
             // A game or presentation is running: this window waits until it ends (see ReleaseHeldWindows).
@@ -1051,8 +1060,9 @@ public sealed class Engine : IDisposable
         string title = WindowInfo.GetTitle(hwnd);
 
         if (rule != null) rule = RefreshRuleDetails(rule, app, hwnd);
-        try { PlaceNewWindow(hwnd, app, rule, title, p); }
-        finally { WindowHandled?.Invoke(app.Key); }
+        rule = RuleForWindow(app, rule, hwnd, title, out string? note);
+        try { PlaceNewWindow(hwnd, app, rule, title, p, note); }
+        finally { LaunchWindowPlaced(app.Key); WindowHandled?.Invoke(app.Key); }
     }
 
     /// <summary>
@@ -1224,12 +1234,25 @@ public sealed class Engine : IDisposable
     /// <summary>The monitor you were using when the window appeared: the pointer's, or (keyboard only) the focused window's.</summary>
     private MonitorInfo? MonitorInUse(Pending p) => MonitorByDevice(p.FocusDevice) ?? MonitorAt(p.Pointer);
 
-    private void PlaceNewWindow(IntPtr hwnd, AppIdentity app, AppRule? rule, string title, Pending p)
+    /// <summary>
+    /// Places a new window by its app's choice (<paramref name="rule"/>, already adjusted for this window: see
+    /// <see cref="RuleForWindow"/>). <paramref name="note"/> is why, when it isn't the app's own choice.
+    /// </summary>
+    private void PlaceNewWindow(IntPtr hwnd, AppIdentity app, AppRule? rule, string title, Pending p, string? note)
     {
-        if (rule != null && rule.NeverMove) return;
+        if (rule != null && rule.NeverMove)
+        {
+            if (note != null) Log.Write($"Left {app.Key} \"{title}\" where it is ({note}: never moved).");
+            return;
+        }
         bool wantsPointer = rule?.FollowMouse == true || (rule == null && Settings.UnknownFollowMouse);
         var (target, reason, displaced, returnTo, plain) = ChooseTarget(rule, MonitorOfWindow(hwnd), wantsPointer ? MonitorInUse(p) : null);
         if (target == null) return;
+        if (note != null)
+        {
+            reason += $"; {note}";
+            if (!displaced) plain = note;
+        }
         if (p.WasHeld) reason += "; held during a display change";
         if (p.AtSignIn) reason += "; it opened while you were signing in";
 
@@ -1451,7 +1474,7 @@ public sealed class Engine : IDisposable
         if (owner == IntPtr.Zero || owner == hwnd || !Native.IsWindowVisible(owner) || Native.IsIconic(owner)) return;
         var app = WindowInfo.Identify(owner);
         if (app == null || Settings.Find(app.Key)?.NeverMove == true) return;
-        if (OnlyAppKey != null && !string.Equals(app.Key, OnlyAppKey, StringComparison.OrdinalIgnoreCase)) return;
+        if (!PlacesApp(app.Key)) return;
         var target = MonitorOfWindow(owner);
         var current = MonitorOfWindow(hwnd);
         if (target == null || current == null || current.DeviceName == target.DeviceName) return;
@@ -1562,6 +1585,7 @@ public sealed class Engine : IDisposable
             var now = DateTime.UtcNow;
             TrackForeground(now);
             AfterMonitorChanges(now);
+            NoteSetup();
         }
         if (!_learning) return;
         if (gamePaused) { ResetStreak(); _positionSample = null; return; } // a game's own windows teach nothing
@@ -1695,6 +1719,8 @@ public sealed class Engine : IDisposable
         ReloadIfChanged();
         var rule = Settings.Find(app.Key);
         if (rule != null) rule = RefreshRuleDetails(rule, app, hwnd);
+        // A window that one of its app's rules for some windows applies to says nothing about the app itself.
+        if (MatchesWindowRule(rule, hwnd)) return;
         // It's there only because its own monitor couldn't be used: that's not a choice. (Drag it elsewhere and it is.)
         if (_displaced.TryGetValue(hwnd, out var displaced)
             && string.Equals(displaced.DroppedDevice, mon.DeviceName, StringComparison.OrdinalIgnoreCase)) return;
@@ -1721,6 +1747,8 @@ public sealed class Engine : IDisposable
         if (rule == null && WindowInfo.IsOneOffApp(app.Key)) return; // setup / uninstall / update programs
         if (mon.IsTemporary) return; // wireless, virtual…: never an app's home unless you set it
         if (mon.OnlyChosenApps) return; // "only apps I choose": learning never makes it a home
+        // Another setup than the usual one: learned for these monitors only.
+        if (rule != null && InOtherSetup) { LearnForSetup(rule, mon); return; }
         if (rule != null && Resolve(rule)?.DeviceName == mon.DeviceName)
         {
             if (rule.MonitorDevice != mon.DeviceName || rule.MonitorName != mon.FriendlyName
@@ -1881,7 +1909,15 @@ public sealed class Engine : IDisposable
     /// <summary>Remembers a new window placed on a stand-in monitor (see <see cref="ChooseTarget"/>), if it was.</summary>
     private void RememberDisplaced(IntPtr h, AppRule? rule, bool displaced, MonitorRef? returnTo)
     {
-        if (displaced && rule != null) AddDisplaced(h, rule.Key, null, null);
+        if (displaced && rule != null)
+        {
+            // A window rule, launch shortcut or setup chose another monitor than the app's own: back to that one.
+            var saved = Settings.Find(rule.Key);
+            bool own = rule.MonitorDevice != null && !rule.FollowLastUsed && saved != null
+                       && (saved.MonitorDevice != rule.MonitorDevice || saved.MonitorName != rule.MonitorName);
+            if (own) AddDisplaced(h, null, new MonitorRef { Device = rule.MonitorDevice!, Name = rule.MonitorName, Hardware = rule.MonitorHardware }, null);
+            else AddDisplaced(h, rule.Key, null, null);
+        }
         else if (returnTo != null) AddDisplaced(h, null, returnTo, null);
     }
 
@@ -1915,7 +1951,7 @@ public sealed class Engine : IDisposable
     {
         if (d.AppKey != null)
         {
-            var rule = Settings.Find(d.AppKey);
+            var rule = WithSetupHome(Settings.Find(d.AppKey));
             if (rule == null || rule.NeverMove || rule.FollowMouse) return (null, true);
             var m = Resolve(rule);
             return m != null && IsAllowed(rule, m) && CanUse(rule, m) ? (m, false) : (null, false);
@@ -2290,7 +2326,7 @@ public sealed class Engine : IDisposable
             if (Native.IsIconic(h) || WindowInfo.Classify(h, _ownPid) != WindowInfo.Kind.AppWindow) continue;
             var app = WindowInfo.Identify(h);
             if (app == null) continue;
-            var rule = Settings.Find(app.Key);
+            var rule = RuleForWindow(app, Settings.Find(app.Key), h, WindowInfo.GetTitle(h), out _);
             if (rule?.NeverMove == true) continue;
             var current = MonitorOfWindow(h);
             if (current == null) continue;
@@ -2465,7 +2501,7 @@ public sealed class Engine : IDisposable
     {
         var want = new Dictionary<int, (int Modifiers, int Key)>();
         var hk = Settings.HotKeys;
-        if (IsMainEngine && hk.Enabled && OnlyAppKey == null && _monitors.Count > 1)
+        if (IsMainEngine && hk.Enabled && OnlyAppKeys == null && _monitors.Count > 1)
         {
             for (int i = 0; i < HotKeyActions.All.Length; i++)
             {
@@ -2830,6 +2866,7 @@ public sealed class Engine : IDisposable
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
         if (Policy.IsAppLocked(key)) return;
+        if (monitor != null && PinForSetup(key, monitor)) return; // another setup than the usual one: for these monitors only
         var undo = PinCore(key, monitor, displayName, out var rule, out int n);
         string moved = n == 0 ? "" : n == 1 ? " Its open window was moved there." : $" Its {n} open windows were moved there.";
         string text = monitor == null ? $"Never move {rule.DisplayName}" : $"{rule.DisplayName} opens on {monitor.Name}";
@@ -2853,6 +2890,7 @@ public sealed class Engine : IDisposable
         rule.AllowedMonitors.Clear();
         if (monitor != null) SetMonitor(rule, monitor);
         rule.UpdatedUtc = DateTime.UtcNow;
+        ForgetCurrentSetupHome(key); // (your choice now applies here too)
         Save();
         ResetStreak();
         if (monitor != null) undo.Windows.AddRange(MoveOpenWindows(rule.Key, rule, monitor, "set by you"));
@@ -2895,6 +2933,7 @@ public sealed class Engine : IDisposable
                     ?? AllowedInOrder(rule).FirstOrDefault();
         SetMonitor(rule, start);
         rule.UpdatedUtc = DateTime.UtcNow;
+        ForgetCurrentSetupHome(key);
         Save();
         ResetStreak();
         string where = string.Join(" or ", allowed.Select(m => m.Name));
@@ -2921,6 +2960,7 @@ public sealed class Engine : IDisposable
         // Every monitor ticked = any monitor (also ones connected later).
         rule.AllowedMonitors = allowed.Count >= _monitors.Count ? new List<MonitorRef>() : allowed.Select(RefTo).ToList();
         rule.UpdatedUtc = DateTime.UtcNow;
+        ForgetCurrentSetupHome(key);
         Save();
         ResetStreak();
         string which = rule.AllowedMonitors.Count == 0 ? "any monitor" : string.Join(" or ", allowed.Select(m => m.Name));
@@ -3373,6 +3413,7 @@ public sealed class Engine : IDisposable
         var rule = Settings.Find(key);
         if (rule == null || Policy.IsAppLocked(key)) return;
         Settings.Apps.Remove(rule);
+        foreach (var setup in Settings.Setups) setup.Homes.RemoveAll(h => string.Equals(h.Key, key, StringComparison.OrdinalIgnoreCase));
         Save(); ResetStreak();
         Note($"Forgot {rule.DisplayName}.", $"[{rule.Key}]");
         Changed?.Invoke();
@@ -3385,6 +3426,7 @@ public sealed class Engine : IDisposable
         SettingsStore.WriteBackup(force: true); // "Forget all" can always be undone with Restore a backup
         int n = Settings.Apps.Count(a => !Policy.IsAppLocked(a.Key));
         Settings.Apps.RemoveAll(a => !Policy.IsAppLocked(a.Key)); // (apps your organization sets stay)
+        foreach (var setup in Settings.Setups) setup.Homes.RemoveAll(h => Settings.Find(h.Key) == null);
         Save(); ResetStreak();
         Note($"Forgot all {n} apps.", "");
         Changed?.Invoke();

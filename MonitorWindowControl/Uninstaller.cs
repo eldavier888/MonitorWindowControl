@@ -84,12 +84,13 @@ public static class Uninstaller
     /// <paramref name="keepSettings"/>) the settings folder are deleted by a short-lived process once this one has exited,
     /// so the caller must exit right after this.
     /// </summary>
-    public static void Remove(bool keepSettings, IEnumerable<AppRule> apps)
+    public static void Remove(bool keepSettings, IEnumerable<AppRule> apps, IEnumerable<AppGroup> groups)
     {
         Log.Write($"Removing Monitor Window Control from this PC ({(keepSettings ? "keeping" : "deleting")} the settings).");
         HelperManager.Stop();
         StartupManager.Apply(RunModes.Tray, false, "", "");
         foreach (var rule in apps) ShortcutManager.Delete(rule);
+        foreach (var group in groups) ShortcutManager.Delete(group);
         Native.SetRestartAfterUpdate(null);
         try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, false); }
         catch (Exception ex) { Log.Write("Could not remove the Installed apps entry: " + ex.Message); }
@@ -151,7 +152,7 @@ public static class Uninstaller
             return;
         }
         var settings = SettingsStore.Load(out _);
-        Remove(keep.Value, settings.Apps);
+        Remove(keep.Value, settings.Apps, settings.Groups);
         await new Wpf.Ui.Controls.MessageBox
         {
             Title = "Monitor Window Control was removed",

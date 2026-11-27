@@ -448,6 +448,11 @@
                                                            AutomationProperties.Name="{Binding Name, StringFormat='Make {0} the main monitor'}"
                                                            Visibility="{Binding IsPrimary, Converter={StaticResource HideWhenTrue}}"
                                                            ToolTip="Make this the main monitor in Windows (taskbar clock, Start menu, and where new apps open)" />
+                                                <ui:Button Content="Disconnect" Margin="8,0,0,0" Click="DisconnectMonitor_Click"
+                                                           Icon="{ui:SymbolIcon PlugDisconnected24}"
+                                                           Visibility="{Binding CanDisconnect, Converter={StaticResource ShowWhenTrue}}"
+                                                           AutomationProperties.Name="{Binding Name, StringFormat='Disconnect {0} from Windows'}"
+                                                           ToolTip="Windows stops using this monitor until you connect it again, like Disconnect this display in Windows Settings. It stays plugged in." />
                                             </StackPanel>
                                         </ui:CardControl>
                                         <!-- Wireless, virtual and USB monitors: are they temporary? -->
@@ -500,6 +505,23 @@
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
+                        <!-- Plugged in, but disconnected from Windows (here or in Windows Settings) -->
+                        <ItemsControl x:Name="DisconnectedList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <ui:CardControl Icon="{ui:SymbolIcon Symbol=PlugDisconnected24}" Margin="0,0,0,4">
+                                        <ui:CardControl.Header>
+                                            <StackPanel Margin="0,0,16,0">
+                                                <TextBlock Style="{StaticResource CardTitle}" Text="{Binding Name}" />
+                                                <TextBlock Style="{StaticResource Secondary}" Text="Disconnected from Windows. It's plugged in, but Windows doesn't use it." />
+                                            </StackPanel>
+                                        </ui:CardControl.Header>
+                                        <ui:Button Content="Connect" Click="ConnectMonitor_Click" Icon="{ui:SymbolIcon PlugConnected24}"
+                                                   AutomationProperties.Name="{Binding Name, StringFormat='Connect {0} to Windows again'}" />
+                                    </ui:CardControl>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
                         <ui:CardControl x:Name="KeepMainCard" Icon="{ui:SymbolIcon Symbol=DesktopCheckmark24}" Margin="0,12,0,4">
                             <ui:CardControl.Header>
                                 <StackPanel Margin="0,0,16,0">
@@ -509,6 +531,34 @@
                             </ui:CardControl.Header>
                             <ui:ToggleSwitch x:Name="KeepMainToggle" AutomationProperties.Name="Keep my main monitor" Click="KeepMainToggle_Click" />
                         </ui:CardControl>
+                        <!-- Your setups: shown once a second set of monitors has been seen -->
+                        <StackPanel x:Name="SetupsSection" Visibility="Collapsed">
+                            <TextBlock Style="{StaticResource SectionHeader}" Text="Your setups" />
+                            <TextBlock Style="{StaticResource Secondary}" Margin="2,0,0,8" TextWrapping="Wrap"
+                                       Text="Each set of monitors you use is remembered. With your usual monitors, apps open where you chose. With other monitors, an app can open somewhere else: choose its monitor on the Apps page while those monitors are connected, or just use it there." />
+                            <ItemsControl x:Name="SetupsList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=DesktopFlow24}" Margin="0,0,0,4">
+                                            <ui:CardControl.Header>
+                                                <StackPanel Margin="0,0,16,0">
+                                                    <TextBlock Style="{StaticResource CardTitle}" Text="{Binding Title}" />
+                                                    <TextBlock Style="{StaticResource Secondary}" Text="{Binding Detail}" TextWrapping="Wrap" />
+                                                </StackPanel>
+                                            </ui:CardControl.Header>
+                                            <StackPanel Orientation="Horizontal">
+                                                <ui:Button Content="Rename" Click="RenameSetup_Click"
+                                                           AutomationProperties.Name="{Binding Title, StringFormat='Rename the setup {0}'}" />
+                                                <ui:Button Content="Forget" Margin="8,0,0,0" Click="ForgetSetup_Click"
+                                                           Visibility="{Binding CanForget, Converter={StaticResource ShowWhenTrue}}"
+                                                           AutomationProperties.Name="{Binding Title, StringFormat='Forget the setup {0}'}"
+                                                           ToolTip="Forget this setup and where apps open with it" />
+                                            </StackPanel>
+                                        </ui:CardControl>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
                         <TextBlock Style="{StaticResource SectionHeader}" Text="Related settings" />
                         <ui:CardControl Icon="{ui:SymbolIcon Symbol=LinkSquare24}">
                             <ui:CardControl.Header>
@@ -568,7 +618,7 @@
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="5*" /><ColumnDefinition Width="5*" />
                                                         </Grid.ColumnDefinitions>
-                                                        <StackPanel Margin="0,0,8,0">
+                                                        <StackPanel Margin="{Binding Indent}">
                                                             <DockPanel>
                                                                 <!-- A tip for an app that keeps moving itself back (see Advanced) -->
                                                                 <ui:SymbolIcon DockPanel.Dock="Right" Symbol="Info16" FontSize="14" Margin="6,0,0,0"
@@ -582,6 +632,13 @@
                                                         <StackPanel Grid.Column="1" ToolTip="{Binding OpensOn}">
                                                             <TextBlock Text="{Binding OpensOn}" TextTrimming="CharacterEllipsis" />
                                                             <TextBlock Text="{Binding Source}" Style="{StaticResource Secondary}" TextWrapping="NoWrap" />
+                                                            <!-- This app opens somewhere else with another set of monitors -->
+                                                            <Border HorizontalAlignment="Left" Margin="0,3,0,0" Padding="6,1" CornerRadius="4"
+                                                                    Background="{DynamicResource ControlFillColorSecondaryBrush}"
+                                                                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
+                                                                    Visibility="{Binding HasChip, Converter={StaticResource ShowWhenTrue}}">
+                                                                <TextBlock Text="{Binding Chip}" FontSize="12" TextTrimming="CharacterEllipsis" />
+                                                            </Border>
                                                         </StackPanel>
                                                     </Grid>
                                                 </DataTemplate>
@@ -607,6 +664,7 @@
                                         <ComboBox x:Name="TargetCombo" HorizontalAlignment="Stretch" AutomationProperties.Name="Open it on" SelectionChanged="TargetCombo_SelectionChanged" />
                                         <TextBlock x:Name="AppPolicyNote" Style="{StaticResource Secondary}" Margin="0,4,0,0" Visibility="Collapsed"
                                                    Text="Where this app opens is set by your organization." />
+                                        <TextBlock x:Name="SetupNote" Style="{StaticResource Secondary}" Margin="0,4,0,0" Visibility="Collapsed" TextWrapping="Wrap" />
                                         <!-- An app that's open now: move its windows there once, without saving -->
                                         <ui:Button x:Name="MoveNowButton" Content="Move its windows there now" Margin="0,8,0,0" Visibility="Collapsed"
                                                    Icon="{ui:SymbolIcon ArrowMove24}" Click="MoveNow_Click"
@@ -675,10 +733,42 @@
                                             <ui:Button x:Name="ForgetButton" Content="Forget" Margin="8,0,0,0" Click="Forget_Click"
                                                        AutomationProperties.Name="Forget this app" ToolTip="Forget this app's monitor (Delete key)" />
                                         </StackPanel>
-                                        <!-- Launch shortcut (the way to use "nothing in the background"; works in every mode) -->
+                                        <!-- Rules for some of its windows (a browser profile, a meeting window…) -->
+                                        <Separator Margin="0,14,0,10" />
+                                        <TextBlock Text="Rules for some of its windows" Margin="0,0,0,2" />
+                                        <TextBlock x:Name="WindowRulesHint" Style="{StaticResource Secondary}" TextWrapping="Wrap" Margin="0,0,0,6" />
+                                        <ItemsControl x:Name="WindowRulesList" KeyboardNavigation.TabNavigation="Continue">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <DockPanel Margin="0,0,0,4">
+                                                        <ui:Button DockPanel.Dock="Right" Content="Remove" Appearance="Transparent" Margin="8,0,0,0"
+                                                                   Click="RemoveWindowRule_Click" VerticalAlignment="Center"
+                                                                   AutomationProperties.Name="{Binding Text, StringFormat='Remove the rule: {0}'}" />
+                                                        <TextBlock Text="{Binding Text}" TextWrapping="Wrap" VerticalAlignment="Center" />
+                                                    </DockPanel>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <ui:Button x:Name="AddWindowRuleButton" Content="Add a rule for some of its windows…" Click="AddWindowRule_Click"
+                                                   Icon="{ui:SymbolIcon WindowNew24}" Margin="0,2,0,0"
+                                                   AutomationProperties.Name="Add a rule for some of its windows" />
+                                        <!-- Launch shortcuts (the way to use "nothing in the background"; works in every mode) -->
                                         <Separator Margin="0,14,0,10" />
                                         <TextBlock x:Name="ShortcutStatus" Style="{StaticResource Secondary}" FontSize="13" TextWrapping="Wrap" Margin="0,0,0,8" />
-                                        <ui:Button x:Name="ShortcutButton" Content="Create launch shortcut" Click="Shortcut_Click" Icon="{ui:SymbolIcon Pin24}" />
+                                        <ItemsControl x:Name="ShortcutsList" KeyboardNavigation.TabNavigation="Continue">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <DockPanel Margin="0,0,0,4">
+                                                        <ui:Button DockPanel.Dock="Right" Content="Remove" Appearance="Transparent" Margin="8,0,0,0"
+                                                                   Click="RemoveShortcut_Click" VerticalAlignment="Center"
+                                                                   AutomationProperties.Name="{Binding File, StringFormat='Remove the shortcut {0}'}" />
+                                                        <TextBlock Text="{Binding File}" TextWrapping="Wrap" VerticalAlignment="Center" />
+                                                    </DockPanel>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <ui:Button x:Name="ShortcutButton" Content="Create launch shortcut…" Click="Shortcut_Click" Icon="{ui:SymbolIcon Pin24}"
+                                                   AutomationProperties.Name="Create a launch shortcut" />
                                     </StackPanel>
                                 </ui:Card>
                                 <TextBlock Style="{StaticResource Secondary}" Margin="2,8,0,0"
@@ -687,6 +777,37 @@
                         </Grid>
 
                         <ui:Button x:Name="ForgetAllButton" Content="Forget all apps…" Margin="0,16,0,0" Click="ForgetAll_Click" Icon="{ui:SymbolIcon Delete24}" />
+
+                        <!-- App groups: open a set of apps together, each on its monitor -->
+                        <TextBlock Style="{StaticResource SectionHeader}" Text="App groups" />
+                        <TextBlock Style="{StaticResource Secondary}" Margin="2,0,0,8" TextWrapping="Wrap"
+                                   Text="Open several apps at once, each on its monitor: for example a streaming app on the TV and a chat app on the side monitor. Groups don't close apps." />
+                        <ItemsControl x:Name="GroupsList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <ui:CardControl Icon="{ui:SymbolIcon Symbol=Apps24}" Margin="0,0,0,4">
+                                        <ui:CardControl.Header>
+                                            <StackPanel Margin="0,0,16,0">
+                                                <TextBlock Style="{StaticResource CardTitle}" Text="{Binding Name}" />
+                                                <TextBlock Style="{StaticResource Secondary}" Text="{Binding Detail}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </ui:CardControl.Header>
+                                        <StackPanel Orientation="Horizontal">
+                                            <ui:Button Content="Open" Appearance="Primary" Click="OpenGroup_Click" IsEnabled="{Binding CanOpen}"
+                                                       AutomationProperties.Name="{Binding Name, StringFormat='Open the group {0}'}" />
+                                            <ui:Button Content="{Binding ShortcutText}" Margin="8,0,0,0" Click="GroupShortcut_Click"
+                                                       AutomationProperties.Name="{Binding ShortcutName}" />
+                                            <ui:Button Content="Edit" Margin="8,0,0,0" Click="EditGroup_Click"
+                                                       AutomationProperties.Name="{Binding Name, StringFormat='Edit the group {0}'}" />
+                                            <ui:Button Content="Delete" Margin="8,0,0,0" Click="DeleteGroup_Click"
+                                                       AutomationProperties.Name="{Binding Name, StringFormat='Delete the group {0}'}" />
+                                        </StackPanel>
+                                    </ui:CardControl>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <ui:Button x:Name="NewGroupButton" Content="New group…" Margin="0,4,0,0" Click="NewGroup_Click" Icon="{ui:SymbolIcon Add24}"
+                                   AutomationProperties.Name="New app group" />
                     </StackPanel>
 
                     <!-- ============================================================ About -->

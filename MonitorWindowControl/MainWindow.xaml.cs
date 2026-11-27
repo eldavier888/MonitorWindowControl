@@ -19,14 +19,25 @@ public sealed class HideWhenTrueConverter : System.Windows.Data.IValueConverter
         throw new NotSupportedException();
 }
 
-/// <summary>One row: a saved app (learned / set by you), or an app that's open right now but not saved yet.</summary>
-public sealed record AppRow(string Key, string Name, string Detail, string OpensOn, string Source, string? CurrentDevice, string? Hint = null)
+/// <summary>
+/// One row: a saved app (learned / set by you), an app that's open right now but not saved yet, or (indented under its
+/// app, <see cref="IsChild"/>) one of an app's rules for some of its windows. <see cref="Chip"/> says where the app opens
+/// with another set of monitors.
+/// </summary>
+public sealed record AppRow(string Key, string Name, string Detail, string OpensOn, string Source, string? CurrentDevice, string? Hint = null,
+    bool IsChild = false, string? Chip = null)
 {
     /// <summary>Show the tip icon (an app that keeps moving itself back).</summary>
     public bool HasHint => Hint != null;
 
+    /// <summary>Show the "With 2 monitors: …" chip.</summary>
+    public bool HasChip => Chip != null;
+
+    /// <summary>A rule for some windows sits indented under its app.</summary>
+    public Thickness Indent => IsChild ? new Thickness(20, 0, 8, 0) : new Thickness(0, 0, 8, 0);
+
     /// <summary>What Narrator and other screen readers say for the row.</summary>
-    public override string ToString() => $"{Name}, opens on {OpensOn}, {Source}" + (Hint == null ? "" : $". {Hint}");
+    public override string ToString() => $"{Name}, opens on {OpensOn}, {Source}" + (Hint == null ? "" : $". {Hint}") + (Chip == null ? "" : $". {Chip}");
 }
 
 /// <summary>
@@ -348,6 +359,9 @@ public partial class MainWindow : FluentWindow
             if (sig != _monitorSig) { _monitorSig = sig; MonitorsList.ItemsSource = _engine.Monitors.ToList(); }
             MonitorLayout.SetMonitors(_engine.Monitors);
             UpdateKeepMainCard(launchOnly);
+            UpdateDisconnectedList();
+            UpdateSetupsSection();
+            UpdateGroups();
         }
         finally { _updating = false; }
         RefreshAppList(background: false);
@@ -372,7 +386,8 @@ public partial class MainWindow : FluentWindow
             var open = _engine.GetOpenApps();
             var saved = s.Apps
                 .OrderBy(a => a.DisplayName, StringComparer.CurrentCultureIgnoreCase)
-                .Select(r => ToRow(r, open.FirstOrDefault(o => string.Equals(o.App.Key, r.Key, StringComparison.OrdinalIgnoreCase))));
+                .SelectMany(r => new[] { ToRow(r, open.FirstOrDefault(o => string.Equals(o.App.Key, r.Key, StringComparison.OrdinalIgnoreCase))) }
+                                 .Concat(WindowRuleRows(r)));
             var openOnly = open
                 .Where(o => s.Find(o.App.Key) == null)
                 .OrderBy(o => o.App.DisplayName, StringComparer.CurrentCultureIgnoreCase)
@@ -428,8 +443,9 @@ public partial class MainWindow : FluentWindow
         }
         else
         {
-            var m = _engine.Resolve(r);
-            opensOn = m == null ? $"{r.MonitorName ?? r.MonitorDevice} (not connected)"
+            var now = _engine.EffectiveRule(r.Key) ?? r; // (its own monitor with the monitors connected now, if it has one)
+            var m = _engine.Resolve(now);
+            opensOn = m == null ? $"{now.MonitorName ?? now.MonitorDevice} (not connected)"
                 : m.IsSwitchedOff ? $"{m.Label} (switched off)" : m.Label;
         }
         var (name, detail) = Names(r.Key, r.DisplayName);
@@ -437,7 +453,7 @@ public partial class MainWindow : FluentWindow
         else if (!r.NeverMove && r.Place == PlaceModes.Last) opensOn += ", where you had it";
         string source = _engine.Policy.IsAppLocked(r.Key) ? "Set by your organization" : r.Pinned || r.NeverMove ? "Set by you" : "Learned";
         return new AppRow(r.Key, name, detail, opensOn, source,
-                          open?.Monitor?.DeviceName, r.MovedItselfBack && !r.NeverMove ? StubbornTip : null);
+                          open?.Monitor?.DeviceName, r.MovedItselfBack && !r.NeverMove ? StubbornTip : null, Chip: SetupChip(r));
     }
 
     private AppRow ToRow(Engine.OpenApp o)
@@ -458,7 +474,9 @@ public partial class MainWindow : FluentWindow
         TargetLayout.IsEnabled = !locked;
         AllowedPanel.IsEnabled = !locked;
         AppPolicyNote.Visibility = locked ? Visibility.Visible : Visibility.Collapsed;
-        SelectedAppName.Text = row?.Name ?? "No app selected";
+        UpdateSetupNote(rule);
+        UpdateWindowRules(row, rule, locked);
+        SelectedAppName.Text = row == null ? "No app selected" : row.IsChild ? rule?.DisplayName ?? row.Detail : row.Name;
         SelectedAppDetail.Text = row == null ? "Select an app in the list." :
             string.Join(" · ", new[] { row.Detail, row.Source }.Where(x => !string.IsNullOrEmpty(x)));
         UpdateShortcutRow(row, rule);
@@ -469,7 +487,8 @@ public partial class MainWindow : FluentWindow
             $"{row.Key}|{rule?.NeverMove}|{rule?.FollowLastUsed}|{rule?.FollowMouse}|{rule?.MonitorDevice}|" +
             string.Join(",", rule?.AllowedMonitors.Select(a => a.Device) ?? Enumerable.Empty<string>()) + "|" +
             $"{rule?.Fallback}|{rule?.FallbackMonitor?.Device}|{s.Fallback}|{s.FallbackMonitor?.Device}|" +
-            $"{rule?.Place}|{rule?.Positions.Count}|{rule?.WaitMs}|{rule?.CorrectForMs}|{rule?.MovedItselfBack}|" +
+            $"{rule?.Place}|{rule?.Positions.Count}|{rule?.WaitMs}|{rule?.CorrectForMs}|{rule?.MovedItselfBack}|{_engine.CurrentSetupId}|" +
+            $"{_engine.EffectiveRule(row.Key)?.MonitorDevice}|{rule?.WindowRules.Count}|" +
             string.Join(",", _engine.Monitors.Select(m => m.DeviceName + "=" + m.Label));
         if (row?.Key == _panelKey && state == _panelState) return;
         _panelKey = row?.Key; _panelState = state;
@@ -507,7 +526,7 @@ public partial class MainWindow : FluentWindow
             TargetCombo.SelectedItem = rule.NeverMove ? NeverMoveLabel
                 : rule.FollowLastUsed ? LastUsedLabel
                 : rule.FollowMouse ? MouseLabel
-                : (object?)_engine.Resolve(rule) ?? _engine.MainMonitor;
+                : (object?)_engine.Resolve(_engine.EffectiveRule(rule.Key) ?? rule) ?? _engine.MainMonitor;
         else // not saved yet: start from the monitor it's on now
             TargetCombo.SelectedItem = _engine.Monitors.FirstOrDefault(m => m.DeviceName == row.CurrentDevice) ?? _engine.MainMonitor;
         UpdateAllowedPanel();
@@ -717,76 +736,6 @@ public partial class MainWindow : FluentWindow
                 : _engine.KeepMainStopped
                     ? $"Windows kept making another monitor main, so {kept} is no longer changed back. Turn this off and on to try again."
                     : $"{kept} stays the main monitor: if Windows makes another monitor main, it's changed back. To keep another one, press Make main on it.";
-    }
-
-    /// <summary>The "launch shortcut" line for the selected app.</summary>
-    private void UpdateShortcutRow(AppRow? row, AppRule? rule)
-    {
-        bool launchOnly = _engine.Settings.RunMode == RunModes.LaunchOnly;
-        if (row == null) { ShortcutStatus.Text = ""; ShortcutButton.IsEnabled = false; return; }
-        if (rule == null)
-        {
-            ShortcutStatus.Text = "Save where it opens first; then you can make a launch shortcut for it.";
-            ShortcutButton.Content = "Create launch shortcut";
-            ShortcutButton.IsEnabled = false;
-            return;
-        }
-        bool exists = ShortcutManager.Exists(rule);
-        ShortcutButton.IsEnabled = true;
-        ShortcutButton.Content = exists ? "Remove shortcut" : "Create launch shortcut";
-        ShortcutStatus.Text = exists
-            ? $"Shortcut: Start menu → Monitor Window Control → {rule.ShortcutFile}. Opening it from there puts it on its monitor."
-            : launchOnly
-                ? "Make a shortcut so this app opens on its monitor without anything running in the background."
-                : "Optional: a shortcut that places the app even when nothing runs in the background.";
-    }
-
-    /// <summary>The Start menu shortcut exists even if only the desktop copy failed.</summary>
-    private static bool ShortcutManagerStartMenuMade(string error) => error.StartsWith("The Start menu shortcut was created", StringComparison.Ordinal);
-
-    private async void Shortcut_Click(object sender, RoutedEventArgs e)
-    {
-        if (AppsList.SelectedItem is not AppRow row || _engine.Settings.Find(row.Key) is not AppRule rule) return;
-        if (ShortcutManager.Exists(rule))
-        {
-            var ask = new Wpf.Ui.Controls.MessageBox
-            {
-                Title = $"Remove the launch shortcut for {ShortcutManager.ShortcutName(rule)}?",
-                Content = "The shortcut in Start menu → Monitor Window Control (and on the desktop, if you made one) is deleted. " +
-                          "The app itself and where it opens aren't changed. If you pinned the shortcut to the taskbar, unpin it too.",
-                PrimaryButtonText = "Remove", CloseButtonText = "Cancel",
-            };
-            if (await ask.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
-            ShortcutManager.Delete(rule);
-            _engine.SetShortcutFile(rule.Key, null);
-            _panelState = ""; UpdateSelectionPanel();
-            return;
-        }
-        if (rule.LaunchTarget == null) _engine.UpdateLaunchTarget(rule.Key);
-        rule = _engine.Settings.Find(row.Key) ?? rule;
-
-        var desktop = new CheckBox { Content = "Also put it on the desktop", IsChecked = false, Margin = new Thickness(0, 10, 0, 0) };
-        var content = new StackPanel();
-        content.Children.Add(new System.Windows.Controls.TextBlock
-        {
-            TextWrapping = TextWrapping.Wrap,
-            Text = $"This adds \"{ShortcutManager.FileName(rule, _engine.Settings.Apps)}\" to Start menu → Monitor Window Control. Opening the app from it " +
-                   "puts its window on its monitor; a tiny helper does that and exits after a few seconds. " +
-                   "Tip: right-click it there and choose \"Pin to taskbar\". Your existing shortcuts aren't changed.",
-        });
-        content.Children.Add(desktop);
-        var box = new Wpf.Ui.Controls.MessageBox
-        {
-            Title = $"Launch shortcut for {ShortcutManager.ShortcutName(rule)}", Content = content,
-            PrimaryButtonText = "Create", CloseButtonText = "Cancel",
-        };
-        if (await box.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
-
-        string? error = ShortcutManager.Create(rule, _engine.Settings.Apps, desktop.IsChecked == true, out string file);
-        if (error == null || ShortcutManagerStartMenuMade(error)) _engine.SetShortcutFile(rule.Key, file);
-        if (error != null)
-            await new Wpf.Ui.Controls.MessageBox { Title = "Shortcut", Content = error, CloseButtonText = "OK" }.ShowDialogAsync();
-        _panelState = ""; UpdateSelectionPanel();
     }
 
     private void TargetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateAllowedPanel();
@@ -1067,12 +1016,13 @@ public partial class MainWindow : FluentWindow
     private async void Forget_Click(object sender, RoutedEventArgs e)
     {
         if (AppsList.SelectedItem is not AppRow row || _engine.Settings.Find(row.Key) is not AppRule rule) return;
-        bool hasShortcut = ShortcutManager.Exists(rule);
+        bool hasShortcut = ShortcutManager.Exists(rule) || rule.MoreShortcuts.Count > 0;
         var box = new Wpf.Ui.Controls.MessageBox
         {
             Title = $"Forget {row.Name}?",
             Content = (rule.Pinned || rule.NeverMove ? "The monitor you chose for it is removed" : "Where it opens is forgotten") +
-                      (hasShortcut ? ", and its launch shortcut is deleted." : ".") +
+                      (hasShortcut ? ", and its launch shortcuts are deleted." : ".") +
+                      (rule.WindowRules.Count > 0 ? " Its rules for some of its windows are removed too." : "") +
                       (_engine.Settings.LearnAutomatically && _engine.Settings.RunMode != RunModes.LaunchOnly
                           ? " It's learned again the next time you use it." : ""),
             PrimaryButtonText = "Forget", CloseButtonText = "Cancel",

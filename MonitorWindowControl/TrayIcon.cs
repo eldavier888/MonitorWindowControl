@@ -8,8 +8,8 @@ namespace MonitorWindowControl;
 
 /// <summary>
 /// Notification-area icon: double-click opens. The menu has, for the last app you used, "Always open on…"; then Open,
-/// Move new windows (pause), Move open windows to their monitors, Bring all windows to…, Monitors (Identify, and "treat
-/// as switched off", two clicks from the couch), Exit. Notifications from the engine show as balloons; selecting one undoes it.
+/// Move new windows (pause), Move open windows to their monitors, Bring all windows to…, Open a group (app groups),
+/// Monitors (Identify, "treat as switched off", two clicks from the couch, and Disconnect from Windows / Connect), Exit. Notifications from the engine show as balloons; selecting one undoes it.
 /// </summary>
 internal sealed class TrayIcon : IDisposable
 {
@@ -23,23 +23,34 @@ internal sealed class TrayIcon : IDisposable
     private readonly ToolStripMenuItem _tidyItem;
     private readonly ToolStripMenuItem _gatherItem;
     private readonly ToolStripMenuItem _monitorsItem;
+    private readonly ToolStripMenuItem _groupsItem;
     private readonly Icon? _iconImage;
     private readonly Font _boldFont;
     private readonly Action<string, string> _openApp;
     private readonly Action<Engine.UndoOutcome> _undone;
     private readonly Action _identify;
+    private readonly Action<MonitorInfo> _disconnect;
+    private readonly Action<DisplayTopology.Disconnected> _connect;
+    private readonly Action<AppGroup> _openGroup;
     private Image? _appImage;
     private int? _balloonActivity; // the Recent activity event the balloon on screen is about (selecting it undoes it)
 
     /// <param name="openApp">Opens the window on the Apps page with this app (key, name) selected.</param>
     /// <param name="undone">Called after a balloon was selected to undo something.</param>
     /// <param name="identify">Shows each monitor's number and name on it for a few seconds.</param>
-    public TrayIcon(Engine engine, Action open, Action exit, Action<string, string> openApp, Action<Engine.UndoOutcome> undone, Action identify)
+    /// <param name="disconnect">Disconnect from Windows (asks first, then offers to keep it).</param>
+    /// <param name="connect">Connects a monitor that's disconnected from Windows (then offers to keep it).</param>
+    /// <param name="openGroup">Opens an app group's apps, each on its monitor.</param>
+    public TrayIcon(Engine engine, Action open, Action exit, Action<string, string> openApp, Action<Engine.UndoOutcome> undone, Action identify,
+        Action<MonitorInfo> disconnect, Action<DisplayTopology.Disconnected> connect, Action<AppGroup> openGroup)
     {
         _engine = engine;
         _openApp = openApp;
         _undone = undone;
         _identify = identify;
+        _disconnect = disconnect;
+        _connect = connect;
+        _openGroup = openGroup;
 
         using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("app.ico"))
             _iconImage = s != null ? new Icon(s, SystemInformation.SmallIconSize) : null;
@@ -52,17 +63,19 @@ internal sealed class TrayIcon : IDisposable
         _enabledItem = new ToolStripMenuItem("Move new windows", null, (_, _) => _engine.SetEnabled(!_engine.Settings.Enabled));
         _tidyItem = new ToolStripMenuItem("Move open windows to their monitors", null, (_, _) => _engine.TidyUp(includeMoved: false));
         _gatherItem = new ToolStripMenuItem("Bring all windows to");
+        _groupsItem = new ToolStripMenuItem("Open a group") { Visible = false };
         _monitorsItem = new ToolStripMenuItem("Monitors");
         _monitorsItem.DropDownItems.Add(new ToolStripMenuItem("(none)") { Enabled = false }); // filled when the menu opens
         var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => exit());
         _menu.Items.AddRange(new ToolStripItem[]
         {
-            _appItem, _appSeparator, openItem, _enabledItem, _tidyItem, _gatherItem, _monitorsItem, new ToolStripSeparator(), exitItem,
+            _appItem, _appSeparator, openItem, _enabledItem, _tidyItem, _gatherItem, _groupsItem, _monitorsItem, new ToolStripSeparator(), exitItem,
         });
         _menu.Opening += (_, _) =>
         {
             FillAppMenu();
             FillTidyItems();
+            FillGroupsMenu();
             FillMonitorsMenu();
         };
 
@@ -190,7 +203,7 @@ internal sealed class TrayIcon : IDisposable
         var monitors = _engine.Monitors.Where(m => !m.IsDuplicated).ToList();
         _monitorsItem.Visible = _engine.Monitors.Count > 0;
         _monitorsItem.DropDownItems.Add(new ToolStripMenuItem("Identify", null, (_, _) => _identify()));
-        if (monitors.Count < 2) return;
+        if (monitors.Count < 2) { FillConnectItems(monitors); return; } // (Connect matters most with one monitor left)
         _monitorsItem.DropDownItems.Add(new ToolStripSeparator());
 
         _monitorsItem.DropDownItems.Add(new ToolStripMenuItem("Treat as switched off:") { Enabled = false });
@@ -209,6 +222,33 @@ internal sealed class TrayIcon : IDisposable
         forAnHour.Enabled = forAnHour.DropDownItems.Count > 0;
         _monitorsItem.DropDownItems.Add(new ToolStripSeparator());
         _monitorsItem.DropDownItems.Add(forAnHour);
+        FillConnectItems(monitors);
+    }
+
+    /// <summary>
+    /// Monitors ▸ "Disconnect from Windows" ▸ each monitor but the main one, and "Connect" for monitors that are plugged in
+    /// but disconnected from Windows. Both open the settings window, which asks first and offers to undo it.
+    /// </summary>
+    private void FillConnectItems(System.Collections.Generic.List<MonitorInfo> monitors)
+    {
+        var disconnect = new ToolStripMenuItem("Disconnect from Windows");
+        foreach (var m in monitors.Where(m => m.CanDisconnect))
+            disconnect.DropDownItems.Add(new ToolStripMenuItem(Escape(m.Name) + "…", null, (_, _) => _disconnect(m)));
+        disconnect.Enabled = disconnect.DropDownItems.Count > 0;
+        _monitorsItem.DropDownItems.Add(new ToolStripSeparator());
+        _monitorsItem.DropDownItems.Add(disconnect);
+        foreach (var d in DisplayTopology.ListDisconnected())
+            _monitorsItem.DropDownItems.Add(new ToolStripMenuItem($"Connect {Escape(d.Name)}", null, (_, _) => _connect(d)));
+    }
+
+    /// <summary>"Open a group" ▸ each app group (hidden while there are none).</summary>
+    private void FillGroupsMenu()
+    {
+        DisposeItems(_groupsItem);
+        var groups = _engine.Settings.Groups.ToList();
+        _groupsItem.Visible = groups.Count > 0;
+        foreach (var g in groups)
+            _groupsItem.DropDownItems.Add(new ToolStripMenuItem(Escape(g.Name), null, (_, _) => _openGroup(g)));
     }
 
     private static void DisposeItems(ToolStripMenuItem parent)

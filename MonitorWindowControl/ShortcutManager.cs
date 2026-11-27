@@ -53,28 +53,90 @@ public static class ShortcutManager
 
     public static bool Exists(AppRule rule) => rule.ShortcutFile != null && File.Exists(StartMenuPath(rule.ShortcutFile));
 
+    /// <summary>Does this shortcut (a file name without .lnk) exist in Start menu → Monitor Window Control?</summary>
+    public static bool FileExists(string file) => File.Exists(StartMenuPath(file));
+
+    /// <summary>Is the app started from its program file (so a web address or file can be opened with it)?</summary>
+    public static bool CanOpenWith(AppRule rule) => rule.LaunchTarget?.StartsWith("exe:", StringComparison.OrdinalIgnoreCase) == true;
+
+    /// <summary>
+    /// A file name for a new shortcut, from the name you typed: without characters Windows doesn't allow, and not the
+    /// same as another shortcut's (a number is added).
+    /// </summary>
+    public static string UniqueFileName(string wanted, AppSettings settings)
+    {
+        string name = wanted;
+        foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, ' ');
+        name = name.Trim().TrimEnd('.');
+        if (name.Length > 80) name = name[..80].TrimEnd();
+        if (name.Length == 0) name = "Shortcut";
+        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var a in settings.Apps)
+        {
+            if (a.ShortcutFile != null) taken.Add(a.ShortcutFile);
+            foreach (var f in a.MoreShortcuts) taken.Add(f);
+        }
+        foreach (var g in settings.Groups) if (g.ShortcutFile != null) taken.Add(g.ShortcutFile);
+        bool Free(string n) => !taken.Contains(n) && !File.Exists(StartMenuPath(n));
+        if (Free(name)) return name;
+        for (int n = 2; ; n++) if (Free($"{name} {n}")) return $"{name} {n}";
+    }
+
     /// <summary>
     /// Creates the shortcut(s). Returns an error message, or null on success; <paramref name="fileName"/> is the name
-    /// used (store it in the app's settings).
+    /// used (store it in the app's settings). With <paramref name="on"/> the app opens on that monitor (this once, each
+    /// time the shortcut is used), with <paramref name="open"/> it opens that web address or file, and
+    /// <paramref name="name"/> is the shortcut's own name (pass it for anything but the app's usual shortcut).
     /// </summary>
-    public static string? Create(AppRule rule, IEnumerable<AppRule> all, bool alsoOnDesktop, out string fileName)
+    public static string? Create(AppRule rule, IEnumerable<AppRule> all, bool alsoOnDesktop, out string fileName,
+        MonitorRef? on = null, string? open = null, string? name = null)
     {
-        fileName = FileName(rule, all);
+        fileName = name ?? FileName(rule, all);
         if (rule.LaunchTarget == null) return "Open the app once first, so Monitor Window Control learns how to start it.";
+        if (open != null && (LaunchOpen.Clean(open) is not string cleaned || !CanOpenWith(rule)))
+            return "That isn't a web address (starting with https://) or the full path of a file.";
         string? helper = HelperManager.EnsureExtracted();
         if (helper == null) return "The helper that the shortcut uses couldn't be unpacked (see the log).";
 
-        string args = "--launch " + QuoteArg(rule.LaunchTarget) + " --key " + QuoteArg(rule.Key);
+        string args = "--launch " + QuoteArg(rule.LaunchTarget) + " --key " + QuoteArg(rule.Key) + MonitorArgs(on);
+        if (open != null) args += " --open " + QuoteArg(LaunchOpen.Clean(open)!);
         string icon = rule.LaunchTarget.StartsWith("exe:", StringComparison.OrdinalIgnoreCase)
             ? rule.LaunchTarget.Substring(4)
             : helper; // Store apps: their icon lives inside the package; use ours
-        string description = $"Opens {ShortcutName(rule)} on its monitor (Monitor Window Control).";
+        string where = on == null ? "on its monitor" : $"on {on.Name ?? "the monitor you chose"}";
+        string description = $"Opens {ShortcutName(rule)} {where} (Monitor Window Control).";
+        return WriteBoth(fileName, helper, args, icon, description, alsoOnDesktop, $"[{rule.Key} → {rule.LaunchTarget}]");
+    }
 
+    /// <summary>Creates the launch shortcut for an app group ("Start Streaming"). Returns an error message, or null.</summary>
+    public static string? CreateForGroup(AppGroup group, AppSettings settings, bool alsoOnDesktop, out string fileName)
+    {
+        fileName = group.ShortcutFile ?? UniqueFileName(group.Name, settings);
+        string? helper = HelperManager.EnsureExtracted();
+        if (helper == null) return "The helper that the shortcut uses couldn't be unpacked (see the log).";
+        return WriteBoth(fileName, helper, "--group " + QuoteArg(group.Id), helper,
+                         $"Opens the apps of {group.Name}, each on its monitor (Monitor Window Control).", alsoOnDesktop, $"[group {group.Id}]");
+    }
+
+    /// <summary>The arguments that tell the helper which monitor to use: its model name and hardware identity.</summary>
+    private static string MonitorArgs(MonitorRef? on)
+    {
+        if (on == null) return "";
+        string s = "";
+        if (!string.IsNullOrEmpty(on.Name)) s += " --on-name " + QuoteArg(on.Name!);
+        if (!string.IsNullOrEmpty(on.Hardware?.Model)) s += " --on-model " + QuoteArg(on.Hardware!.Model!);
+        if (!string.IsNullOrEmpty(on.Hardware?.Serial)) s += " --on-serial " + QuoteArg(on.Hardware!.Serial!);
+        if (!string.IsNullOrEmpty(on.Hardware?.DevicePath)) s += " --on-path " + QuoteArg(on.Hardware!.DevicePath!);
+        return s;
+    }
+
+    private static string? WriteBoth(string fileName, string helper, string args, string icon, string description, bool alsoOnDesktop, string what)
+    {
         try
         {
             Directory.CreateDirectory(Paths.ShortcutsDir);
             Write(StartMenuPath(fileName), helper, args, icon, description);
-            Log.Write($"Created shortcut {StartMenuPath(fileName)}  [{rule.Key} → {rule.LaunchTarget}]");
+            Log.Write($"Created shortcut {StartMenuPath(fileName)}  {what}");
         }
         catch (Exception ex)
         {
@@ -98,11 +160,23 @@ public static class ShortcutManager
         return null;
     }
 
-    /// <summary>Removes this app's shortcuts (Start menu and desktop) if they exist.</summary>
+    /// <summary>Removes this app's shortcuts (its usual one and any others, Start menu and desktop) if they exist.</summary>
     public static void Delete(AppRule rule)
     {
-        if (string.IsNullOrEmpty(rule.ShortcutFile)) return;
-        foreach (var p in new[] { StartMenuPath(rule.ShortcutFile!), DesktopPath(rule.ShortcutFile!) })
+        if (!string.IsNullOrEmpty(rule.ShortcutFile)) DeleteFile(rule.ShortcutFile!);
+        foreach (var f in rule.MoreShortcuts) DeleteFile(f);
+    }
+
+    /// <summary>Removes an app group's shortcut (Start menu and desktop) if it exists.</summary>
+    public static void Delete(AppGroup group)
+    {
+        if (!string.IsNullOrEmpty(group.ShortcutFile)) DeleteFile(group.ShortcutFile!);
+    }
+
+    /// <summary>Removes one shortcut (a file name without .lnk) from the Start menu and the desktop, if it's there.</summary>
+    public static void DeleteFile(string file)
+    {
+        foreach (var p in new[] { StartMenuPath(file), DesktopPath(file) })
         {
             try { if (File.Exists(p)) { File.Delete(p); Log.Write($"Removed shortcut {p}"); } }
             catch (Exception ex) { Log.Write($"Could not remove shortcut {p}: {ex.Message}"); }

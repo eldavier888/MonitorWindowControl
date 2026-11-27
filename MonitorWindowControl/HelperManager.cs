@@ -97,6 +97,27 @@ public static class HelperManager
         return IsRunning() || StartProcess(exe);
     }
 
+    /// <summary>
+    /// Opens an app group: the helper starts each of its apps on its monitor, then exits (like the group's shortcut).
+    /// Returns an error message, or null.
+    /// </summary>
+    public static string? OpenGroup(AppGroup group)
+    {
+        string? exe = EnsureExtracted();
+        if (exe == null) return "The helper that opens groups couldn't be unpacked (see the log).";
+        try
+        {
+            Process.Start(new ProcessStartInfo(exe, "--group " + ShortcutManager.QuoteArg(group.Id)) { UseShellExecute = false })?.Dispose();
+            Log.Write($"Opening the app group \"{group.Name}\".");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"Could not open the app group \"{group.Name}\": {ex.Message}");
+            return "The group couldn't be opened: " + ex.Message;
+        }
+    }
+
     private static bool StartProcess(string exe)
     {
         try

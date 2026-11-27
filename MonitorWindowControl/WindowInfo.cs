@@ -263,6 +263,32 @@ internal static class WindowInfo
         return id.Contains('!') || id.Contains("_crx_", StringComparison.OrdinalIgnoreCase) ? id : null;
     }
 
+    /// <summary>
+    /// The browser profile of a browser window (Chrome, Edge, Brave…), from the window's own app id: each profile gets its
+    /// own taskbar group once you use more than one ("Chrome.Profile 1"…). The profile you started with may report just
+    /// the browser's id or none. Null for windows that aren't a browser's (and for web apps, which are apps of their own).
+    /// </summary>
+    public static string? BrowserProfileOf(IntPtr h)
+    {
+        string? path = GetProcessPath(GetPid(h));
+        if (path == null) return null;
+        string exe = Path.GetFileName(path);
+        if (!BrowserExes.Contains(exe)) return null;
+        string? id = GetWindowAppId(h);
+        if (id != null && (id.Contains('!') || id.Contains("_crx_", StringComparison.OrdinalIgnoreCase))) return null;
+        return id ?? Path.GetFileNameWithoutExtension(exe);
+    }
+
+    /// <summary>A browser profile id in words: "Chrome.Profile 1" → "Profile 1"; the browser's own id → "First profile".</summary>
+    public static string ProfileLabel(string id)
+    {
+        int dot = id.IndexOf('.');
+        if (dot < 0 || dot == id.Length - 1) return "First profile";
+        string rest = id[(dot + 1)..];
+        if (rest.StartsWith("UserData.", StringComparison.OrdinalIgnoreCase)) rest = rest["UserData.".Length..];
+        return rest.Length == 0 ? "First profile" : rest;
+    }
+
     /// <summary>"Prime Video: Watch movies…" → "Prime Video"; "Crave | Watch HBO…" → "Crave".</summary>
     private static string CleanWebAppTitle(string title)
     {

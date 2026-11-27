@@ -57,6 +57,12 @@ public sealed class WpfHost : IEngineHost, IDisposable
 
     public IEngineTimer CreateTimer(int intervalMs, Action tick) => new Timer(_dispatcher, intervalMs, tick);
 
+    public void Post(Action action) => _dispatcher.BeginInvoke(() =>
+    {
+        try { action(); }
+        catch (Exception ex) { Log.Write("Unexpected error (posted): " + ex); }
+    });
+
     public bool RegisterHotKey(int id, int modifiers, int key)
     {
         if (_hotKeyWindow == null)

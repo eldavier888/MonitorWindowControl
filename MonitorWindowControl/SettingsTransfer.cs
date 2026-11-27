@@ -39,6 +39,9 @@ public static class SettingsTransfer
             .Concat(s.Apps.SelectMany(a => a.Positions).Select(p => p.Monitor))
             .Concat(s.MonitorNicknames.Select(n => n.Monitor))
             .Concat(s.MonitorOptions.Select(o => o.Monitor))
+            .Concat(s.Apps.SelectMany(a => a.WindowRules).Select(w => w.Monitor).OfType<MonitorRef>())
+            .Concat(s.Groups.SelectMany(g => g.Apps).Select(a => a.Monitor).OfType<MonitorRef>())
+            .Concat(s.Setups.SelectMany(x => x.Homes).Select(h => h.Monitor))
             .Concat(new[] { s.FallbackMonitor, s.ExportedMainMonitor }.OfType<MonitorRef>());
 
     /// <summary>An app rule's monitor as a reference (null if it has none).</summary>
@@ -113,16 +116,23 @@ public static class SettingsTransfer
 
     /// <summary>
     /// "Replace": the imported settings, keeping the launch shortcuts you have here. Returns the apps whose launch
-    /// shortcuts should be deleted (apps that aren't in the imported settings).
+    /// shortcuts should be deleted (apps that aren't in the imported settings; an app group's shortcut that isn't is
+    /// returned as an entry that only has its file name).
     /// </summary>
     public static AppSettings Replace(AppSettings current, AppSettings imported, out List<AppRule> orphanedShortcuts)
     {
         orphanedShortcuts = new List<AppRule>();
-        foreach (var a in imported.Apps) a.ShortcutFile = null; // made on the other PC: they don't exist here
-        foreach (var mine in current.Apps.Where(a => a.ShortcutFile != null))
+        foreach (var a in imported.Apps) { a.ShortcutFile = null; a.MoreShortcuts.Clear(); } // made on the other PC: they don't exist here
+        foreach (var mine in current.Apps.Where(a => a.ShortcutFile != null || a.MoreShortcuts.Count > 0))
         {
-            if (imported.Find(mine.Key) is AppRule same) same.ShortcutFile = mine.ShortcutFile;
+            if (imported.Find(mine.Key) is AppRule same) { same.ShortcutFile = mine.ShortcutFile; same.MoreShortcuts = mine.MoreShortcuts.ToList(); }
             else orphanedShortcuts.Add(mine);
+        }
+        foreach (var g in imported.Groups) g.ShortcutFile = null;
+        foreach (var mine in current.Groups.Where(g => g.ShortcutFile != null))
+        {
+            if (imported.Groups.FirstOrDefault(g => g.Id == mine.Id) is AppGroup same) same.ShortcutFile = mine.ShortcutFile;
+            else orphanedShortcuts.Add(new AppRule { Key = mine.Id, ShortcutFile = mine.ShortcutFile });
         }
         return imported;
     }
@@ -136,7 +146,13 @@ public static class SettingsTransfer
         foreach (var a in imported.Apps.Where(a => current.Find(a.Key) == null))
         {
             a.ShortcutFile = null;
+            a.MoreShortcuts.Clear();
             current.Apps.Add(a);
+        }
+        foreach (var g in imported.Groups.Where(g => !current.Groups.Any(c => c.Id == g.Id)))
+        {
+            g.ShortcutFile = null;
+            current.Groups.Add(g);
         }
         var named = current.MonitorNicknames.Select(n => Key(n.Monitor)).ToHashSet();
         current.MonitorNicknames.AddRange(imported.MonitorNicknames.Where(n => !named.Contains(Key(n.Monitor))));

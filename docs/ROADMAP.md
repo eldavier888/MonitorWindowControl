@@ -425,6 +425,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 ## Could have
 
 ### 28. Rules for some windows of an app (title or browser profile)
+**Status:** built in v1.6.0 (the dialog is a message box like the app's other dialogs; the title of a new window of an app with title rules is checked again every 0.25 s for up to 1.5 s instead of listening to EVENT_OBJECT_NAMECHANGE; browser profiles are offered from the profiles' open windows; windows a rule applies to teach nothing; a window placed by a rule while its monitor is off goes back to the rule's monitor).
 
 *Placement · effort L*
 
@@ -437,6 +438,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Titles change right after creation (blank, then 'New Tab'), so re-read the title at the 0.4 s placement and listen to EVENT_OBJECT_NAMECHANGE for about 1.5 s. Keep the UI from growing into a trigger editor. Learning should apply to the app rule only.
 
 ### 29. Different homes for different monitor setups (TV on vs off, docked vs undocked)
+**Status:** partly built: the optional mapping of 'main' and 'side' at a new setup isn't built; a setup is named by its monitors' EDID model ids (temporary monitors don't count) and the first one seen is the usual setup; new setups are noted by the program that places windows once monitors have settled for 30 s (with Nothing in the background, only the first one is); a monitor learned for a setup can't be undone from Recent activity (choosing one by hand can).
 
 *Placement · effort L*
 
@@ -449,6 +451,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** UI complexity is the main risk: show at most a chip and a small list. Identical monitors at home and at work produce the same ids, which is usually what users want.
 
 ### 30. Disconnect or reconnect a monitor in one click ('Turn TV off for Windows')
+**Status:** partly built: the optional keyboard shortcut isn't built; the Monitors card has a Disconnect button (the cards have no '…' menu) and disconnected monitors get their own card with Connect; Connect lets Windows choose the mode and position from its display database (only the 15 s revert restores an exact saved configuration); every change is checked with SDC_VALIDATE before it's applied; not yet tried on real hardware.
 
 *Monitors · effort M*
 
@@ -474,6 +477,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Low: local to Monitors.cs and FindMonitor. Test with Win+P on the owner's setup.
 
 ### 32. Launch shortcuts for a specific monitor, with arguments
+**Status:** built in v1.6.0 (the dialog is a message box like the app's other dialogs; the monitor is passed as its model name and hardware identity, not one 'HardwareId'; 'Open with' accepts one http(s) address or full path, passed as one quoted argument, and only for programs, since Store apps can't be given one; when the tray app or helper is running, the shortcut tells it the monitor through launch.json and an event).
 
 *Launch · effort S*
 
@@ -486,6 +490,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Low. Uses the stable HardwareId so shortcuts survive renumbering. Quote and validate arguments carefully, because they come from the user.
 
 ### 33. App groups: open a set of apps, each on its monitor
+**Status:** built in v1.6.0 (apps that are running already are left as they are, because starting a browser again opens another window; the tray entry is in tray mode only).
 
 *Launch · effort M*
 

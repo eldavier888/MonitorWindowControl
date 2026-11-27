@@ -68,15 +68,19 @@ setting of its own. So you choose how much runs in the background (**How it runs
 | **Small background helper** | Only a small helper: no window, no tray icon (about 0% CPU, ~5 MB). The settings window runs only while it's open. | Every new window. Learns where you use apps. |
 | **Nothing in the background** | Nothing at all | Only apps you open from their **launch shortcuts** (Start menu → Monitor Window Control). A helper starts with the app, places its window, and exits after a few seconds. Windows opened any other way (links, apps opening extra windows, autostart) aren't moved, and nothing is learned automatically. |
 
-To make a launch shortcut: select an app in the list, save where it opens, then press **Create launch shortcut**.
-It appears in Start menu → Monitor Window Control (right-click it → *Pin to taskbar* if you like); you can also
-put one on the desktop. Your existing shortcuts are never changed. Launch shortcuts work in every mode.
+To make a launch shortcut: select an app in the list, save where it opens, then press **Create launch shortcut…**.
+Choose **Open on** (*Its usual monitor*, or a monitor of its own, for example "Edge on 3 · TV" next to your usual Edge
+shortcut), optionally **Open with** a web address or file (programs only, not Store apps), and its name. It appears in
+Start menu → Monitor Window Control (right-click it → *Pin to taskbar* if you like); you can also put one on the desktop.
+A monitor chosen for a shortcut is only used when the app is opened from that shortcut: where the app usually opens
+doesn't change. An app can have several shortcuts; each one is listed under the app with **Remove**. Your existing
+shortcuts are never changed. Launch shortcuts work in every mode.
 
 ## Using it
 
 - **Tray icon** (tray mode): double-click to open the window. Right-click for *Open*, *Move new windows*
-  (pause/resume), *Move open windows to their monitors*, *Bring all windows to*, *Monitors* (*Identify*, and treat a
-  monitor as switched off, see below), *Exit*. Closing the window just puts it back in the tray (**Exit** in the window closes it completely).
+  (pause/resume), *Move open windows to their monitors*, *Bring all windows to*, *Open a group* (see App groups),
+  *Monitors* (*Identify*, treat a monitor as switched off, and *Disconnect from Windows* / *Connect*, see below), *Exit*. Closing the window just puts it back in the tray (**Exit** in the window closes it completely).
   In the other modes there's no tray icon: start `MonitorWindowControl.exe` again to change settings, and closing
   its window closes it completely.
 - **Always open on…** (tray mode): the top of the tray menu shows the last app you used, for example
@@ -146,6 +150,18 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
     *Only apps I choose*, only apps you set to open there on the Apps page (or ticked for *Where I used it last*, or
     chose for *If it's off, open on*) open there. Other apps are never learned there, and a new window of another app
     that Windows opens there moves to that app's own monitor or the main monitor. Apps set to *Never move* are left alone.
+  - **Disconnect** (every monitor but the main one): Windows stops using that monitor, the same as Settings → Display →
+    "Disconnect this display". It stays plugged in but goes dark, and its windows move to your other monitors. It asks
+    first, then asks "Keep these display settings?": without **Keep changes** within 15 seconds (or with **Revert**), the
+    previous display settings come back exactly. A disconnected monitor is listed under your monitors with **Connect**
+    (also in the tray menu under *Monitors*); its windows go back to it when it's connected again. The main monitor and
+    the last monitor in use can't be disconnected. No administrator rights are needed.
+- **Your setups** (Monitors page, shown once you've used a second set of monitors, such as the TV on and off, or a laptop
+  at home and at work): each set of monitors is remembered by the monitors' models, so the same monitors anywhere count
+  as the same setup. The first one is your *usual* setup: there, apps open where you chose. While another setup is
+  connected, choosing an app's monitor on the Apps page (or learning) applies to that setup only; the Apps page says so,
+  and the app's row shows a chip such as "With 2 monitors: 2 · Side". **Rename** a setup ("Laptop only") or **Forget** it
+  (asks first). *Where I used it last*, *The monitor I'm using* and *Never move* apply with every setup.
 - **Keep my main monitor** (Monitors page, off by default): after a reconnect, a driver update or a TV waking up,
   Windows sometimes makes another monitor the main one. With this on, Monitor Window Control changes it back to the
   monitor that was main when you turned it on (press **Make main** on another monitor to keep that one instead). It waits
@@ -176,8 +192,22 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
   apps (the General page's choice, the default), the main monitor, another monitor (for example the side monitor for a
   streaming app while the TV is off), or where Windows puts it.
 
+  **Rules for some of its windows**: for an app with several jobs (two browser profiles, a meeting window and the chat,
+  a projector window), **Add a rule for some of its windows…**: *Window title contains / starts with / is* some text
+  (the app's open windows' titles are offered), or for Chrome, Edge and other browsers *Browser profile is* (a profile with
+  a window open), then the monitor those windows open on, or *Never move these windows*. Capital letters don't matter, and
+  only plain text is compared. Rules come before the app's own choice, from the top, and show indented under the app in
+  the list ("Windows whose title contains "Work": 1 · Main"). A new window's title is checked again for 1.5 seconds,
+  because titles often change right after a window opens. Windows a rule applies to never teach the app a monitor.
+  **Remove** takes a rule away (it asks first).
+
   Your choice is "Set by you": learning never overrides it. **Forget** (or the Delete key) removes one app and
   **Forget all…** removes everything; both ask first. With many apps, type in **Search apps** to filter the list.
+- **App groups** (Apps page, under the list): **New group…** takes a name ("Start Streaming") and the saved apps to open,
+  each on its usual monitor or one you choose for the group. **Open** starts them (apps that are running already are left
+  as they are; closing apps is never part of a group), **Create shortcut** puts the group in Start menu → Monitor Window
+  Control, and in tray mode groups are in the tray menu under *Open a group*. **Edit** and **Delete** (asks first) are
+  next to each group. Groups work in every mode.
 - **Tidy up** (General page): **Move open windows to their monitors** puts every open window on its app's monitor, once.
   The button says how many windows it would move. Apps set to *Never move*, apps it hasn't learned yet (unless they're on a
   monitor that's switched off or kept for other apps), minimized, fullscreen and administrator windows, windows on other
@@ -275,7 +305,8 @@ Windows that run as administrator can't be moved by a normal app; Monitor Window
 The tiny helper is unpacked to `%LocalAppData%\MonitorWindowControl\MonitorWindowControlHelper.exe` when a mode
 or shortcut needs it. Next to it, `signin.txt` only notes when you last signed in, so apps that opened while signing in
 are placed once per sign-in, and in helper mode `request.json` and `reply.json` pass Recent activity, *Move open windows*
-and *Undo* between the settings window and the helper (window titles are never written there). The `Crashes` folder
+and *Undo* between the settings window and the helper (window titles are never written there). `launch.json` tells the
+tray app or helper which monitor a launch shortcut or group chose, for that one launch. The `Crashes` folder
 there holds crash reports, if there ever were any (the last 10).
 
 To remove it: About → **Remove from this PC**, or Settings → Apps → Installed apps. To start completely fresh instead,
@@ -299,7 +330,8 @@ the 3 MB native helper is packed inside it).
 Project layout:
 
 - `MonitorWindowControl\Engine.cs`: detects new windows, decides and moves them, and does the learning
-  (shared by the app and the helper; runs on whatever `IEngineHost` the program provides, see `Host.cs`)
+  (shared by the app and the helper; runs on whatever `IEngineHost` the program provides, see `Host.cs`);
+  `Engine.Rules.cs`: rules for some windows, monitor setups, a launch shortcut's monitor, app groups
 - `MonitorWindowControl\Monitors.cs`: lists monitors, their model names and hardware identity (EDID serial,
   port), duplicated monitors, and finds a saved monitor again (`MonitorMatcher`)
 - `MonitorWindowControl\WindowInfo.cs`: decides which windows are real app windows, which app they belong to,
@@ -313,6 +345,7 @@ Project layout:
 - `MonitorWindowControl\Policy.cs`, `CrashReports.cs` (shared): organisation policies; local crash reports
 - `MonitorWindowControl\SettingsTransfer.cs`, `Diagnostics.cs`, `Uninstaller.cs`: import with monitor matching,
   Save diagnostics, Installed apps entry and Remove from this PC
+- `MonitorWindowControl\DisplayTopology.cs`: Disconnect from Windows and Connect (QueryDisplayConfig / SetDisplayConfig)
 - `policies\`: Group Policy templates (ADMX and ADML)
 - `MonitorWindowControl\tools\make-icon.ps1`: regenerates `app.ico`
 

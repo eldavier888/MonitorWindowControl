@@ -159,6 +159,9 @@ public sealed class MonitorInfo
     /// <summary>Duplicated monitors can't get their own name and number until they're extended again.</summary>
     public bool CanRename => !IsDuplicated;
 
+    /// <summary>"Disconnect from Windows" is offered: never for the main monitor, the only one, or duplicated monitors.</summary>
+    public bool CanDisconnect => !IsPrimary && HasOtherMonitors && !IsDuplicated;
+
     public override string ToString() => Label;
 }
 
