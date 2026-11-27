@@ -23,7 +23,7 @@
     <RootNamespace>MonitorWindowControl</RootNamespace>
     <ApplicationManifest>..\MonitorWindowControl\app.manifest</ApplicationManifest>
     <ApplicationIcon>..\MonitorWindowControl\app.ico</ApplicationIcon>
-    <Version>1.4.0</Version>
+    <Version>1.4.1</Version>
     <Product>Monitor Window Control</Product>
     <AssemblyTitle>Monitor Window Control helper</AssemblyTitle>
     <!-- Shared files use platform APIs; this is Windows-only anyway. -->

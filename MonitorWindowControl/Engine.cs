@@ -21,6 +21,7 @@ public sealed class Engine : IDisposable
     private const int VerifyDelayMs = 800;    // check once that the app didn't move itself back
     private const int LearnIntervalMs = 2000;
     private const int LearnChecksNeeded = 2;  // 2 consecutive checks ≈ 4 s
+    private const int MonitorSettleSeconds = 30; // no learning this long after monitors change
 
     private readonly IEngineHost _host;
     private readonly int _ownPid = Environment.ProcessId;
@@ -36,6 +37,7 @@ public sealed class Engine : IDisposable
     private readonly IEngineTimer _displayTimer;
     private List<MonitorInfo> _monitors = new();
     private string _monitorSignature = "";
+    private DateTime _lastMonitorChangeUtc = DateTime.MinValue;
 
     private string? _streakKey, _streakDevice;
     private int _streakCount, _tickCount;
@@ -206,6 +208,7 @@ public sealed class Engine : IDisposable
         _monitors = list;
         string sig = string.Join("|", list.Select(m => $"{m.DeviceName}={m.Name}{(m.IsPrimary ? "*" : "")}@{m.Bounds}"));
         if (sig == _monitorSignature) return;
+        if (_monitorSignature.Length > 0) _lastMonitorChangeUtc = DateTime.UtcNow; // (not the first read at startup)
         _monitorSignature = sig;
         Log.Write("Monitors: " + string.Join(", ", list.Select(m => $"{m.Label} [{m.DeviceName}]")));
         if (_started) Changed?.Invoke();
@@ -428,6 +431,11 @@ public sealed class Engine : IDisposable
         if (++_tickCount % 30 == 0) _handled.RemoveWhere(h => !Native.IsWindow(h)); // safety net, ~every minute
         ReloadIfChanged(); // pick up changes made in the settings window / by the helper
         if (!_learning) return;
+
+        // Don't learn while monitors are changing (sleep, display driver reset, a game switching resolution…) or
+        // when only one monitor is connected: then you use apps where they *have* to be, not where you want them.
+        if (_monitors.Count < 2 || DateTime.UtcNow - _lastMonitorChangeUtc < TimeSpan.FromSeconds(MonitorSettleSeconds))
+        { ResetStreak(); return; }
 
         // "Where I used it last" apps are tracked even with automatic learning off: you asked for it per app.
         if (!Settings.Enabled || (!Settings.LearnAutomatically && !Settings.Apps.Any(a => a.FollowLastUsed)))
