@@ -511,6 +511,12 @@ public sealed class AppSettings
     public HotKeySettings HotKeys { get; set; } = new();
     /// <summary>"Notifications" (all off by default).</summary>
     public NoticeSettings Notices { get; set; } = new();
+    /// <summary>
+    /// Only in a file made with "Export settings": the main monitor of the PC it came from, so "Import settings" can
+    /// match it to this PC's main monitor. Never written to settings.json itself.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public MonitorRef? ExportedMainMonitor { get; set; }
 
     public AppRule? Find(string key) =>
         Apps.FirstOrDefault(a => string.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase));
@@ -676,6 +682,7 @@ public static class SettingsStore
         if (s.KeepMainMonitor != null) CleanRef(s.KeepMainMonitor);
         else s.KeepMainStopped = false;
         s.RunMode = RunModes.Normalize(s.RunMode);
+        if (s.ExportedMainMonitor != null) CleanRef(s.ExportedMainMonitor);
         s.Notices ??= new();
         CleanHotKeys(s.HotKeys ??= new());
     }
@@ -717,6 +724,7 @@ public static class SettingsStore
         {
             Directory.CreateDirectory(Paths.Dir);
             File.WriteAllText(tmp, JsonSerializer.Serialize(s, SettingsJson.Default.AppSettings));
+            WriteBackup(force: false); // the first save of the day keeps yesterday's settings
             // A rename keeps the file's time stamp: remember ours, so a later write by the other process is noticed.
             var myStamp = File.GetLastWriteTimeUtc(tmp);
             for (int attempt = 0; ; attempt++)
@@ -732,6 +740,100 @@ public static class SettingsStore
             Log.Write("Could not save settings: " + ex.Message);
             try { File.Delete(tmp); } catch { }
         }
+    }
+
+    // ------------------------------------------------------------------ backups, export and import
+
+    /// <summary>Daily copies kept by <see cref="WriteBackup"/>.</summary>
+    public const int BackupsKept = 5;
+    /// <summary>Files bigger than this are never read as settings (a real one is a few hundred KB at most).</summary>
+    public const long MaxImportBytes = 4_000_000;
+    private static DateTime _backupDay;
+
+    private static string BackupFile(DateTime day) => Path.Combine(Paths.Dir, $"settings.{day:yyyyMMdd}.json");
+
+    /// <summary>
+    /// Keeps a copy of settings.json as it is now: settings.YYYYMMDD.json, once a day (<paramref name="force"/>: now, even
+    /// if today's copy exists, as "Forget all" and imports do). Only the newest <see cref="BackupsKept"/> are kept.
+    /// Called while saving, holding the settings lock; it does nothing (no file access) after today's copy is made.
+    /// </summary>
+    public static void WriteBackup(bool force)
+    {
+        var today = DateTime.Today;
+        if (!force && _backupDay == today) return;
+        try
+        {
+            if (!File.Exists(Paths.SettingsFile) || _notReadYet) return;
+            string file = BackupFile(today);
+            if (force || !File.Exists(file)) File.Copy(Paths.SettingsFile, file, true);
+            _backupDay = today;
+            foreach (var old in ListBackups().Skip(BackupsKept))
+                try { File.Delete(old.File); } catch { }
+        }
+        catch (Exception ex) { Log.Write("Could not keep a backup of the settings: " + ex.Message); }
+    }
+
+    /// <summary>The daily copies of settings.json, newest first.</summary>
+    public static List<(DateTime Day, string File)> ListBackups()
+    {
+        var list = new List<(DateTime, string)>();
+        try
+        {
+            if (!Directory.Exists(Paths.Dir)) return list;
+            foreach (var f in Directory.EnumerateFiles(Paths.Dir, "settings.????????.json"))
+            {
+                string stamp = Path.GetFileName(f).Substring(9, 8);
+                if (DateTime.TryParseExact(stamp, "yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture,
+                                           System.Globalization.DateTimeStyles.None, out var day))
+                    list.Add((day, f));
+            }
+        }
+        catch { }
+        return list.OrderByDescending(b => b.Item1).ToList();
+    }
+
+    /// <summary>
+    /// Reads a settings file that may come from anywhere (an export, another PC, a backup): never bigger than
+    /// <see cref="MaxImportBytes"/>, it must be valid settings with a known "how it runs", and it's repaired like
+    /// settings.json is. Returns null with a plain <paramref name="error"/> if it can't be used.
+    /// </summary>
+    public static AppSettings? ReadUntrusted(string file, out string? error)
+    {
+        error = null;
+        try
+        {
+            var info = new FileInfo(file);
+            if (!info.Exists) { error = "The file doesn't exist any more."; return null; }
+            if (info.Length > MaxImportBytes) { error = "The file is too big to be Monitor Window Control settings."; return null; }
+            string json = File.ReadAllText(file);
+            var s = JsonSerializer.Deserialize(json, SettingsJson.Default.AppSettings);
+            if (s == null) { error = "The file is empty."; return null; }
+            if (s.RunMode is not (RunModes.Tray or RunModes.Helper or RunModes.LaunchOnly))
+            {
+                error = "The file has a choice this version doesn't know, so it isn't used.";
+                return null;
+            }
+            Clean(s);
+            return s;
+        }
+        catch (JsonException) { error = "The file isn't Monitor Window Control settings, or it's damaged."; return null; }
+        catch (Exception ex) { error = "The file couldn't be read: " + ex.Message; return null; }
+    }
+
+    /// <summary>A separate copy of the settings (changing it doesn't change the original).</summary>
+    public static AppSettings Copy(AppSettings s) =>
+        JsonSerializer.Deserialize(JsonSerializer.Serialize(s, SettingsJson.Default.AppSettings), SettingsJson.Default.AppSettings) ?? new AppSettings();
+
+    /// <summary>Writes settings to a file of your choice ("Export settings"). Returns an error message, or null.</summary>
+    public static string? Export(AppSettings s, string file)
+    {
+        try
+        {
+            File.WriteAllText(file, JsonSerializer.Serialize(s, SettingsJson.Default.AppSettings));
+            Log.Write($"Exported settings to {file}.");
+            return null;
+        }
+        catch (Exception ex) { return ex.Message; }
     }
 }
 

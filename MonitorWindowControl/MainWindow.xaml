@@ -150,6 +150,36 @@
                         <!-- Shown while something outside the app pauses it (Remote Desktop, duplicated monitors) -->
                         <ui:InfoBar x:Name="PauseInfoBar" IsOpen="False" IsClosable="False" Severity="Informational" Margin="0,0,0,12"
                                     AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Status" />
+                        <!-- Settings your organization manages are locked (Windows Settings shows the same bar) -->
+                        <ui:InfoBar x:Name="PolicyInfoBar" IsOpen="False" IsClosable="False" Severity="Informational" Margin="0,0,0,12"
+                                    Title="Some settings are managed by your organization"
+                                    AutomationProperties.Name="Some settings are managed by your organization" />
+                        <!-- Helper mode, but the helper isn't running (it crashed, or something stopped it) -->
+                        <StackPanel x:Name="HelperDownPanel" Visibility="Collapsed" Margin="0,0,0,12">
+                            <ui:InfoBar x:Name="HelperDownBar" IsOpen="True" IsClosable="False" Severity="Warning"
+                                        Title="The background helper isn't running"
+                                        Message="New windows aren't moved to their monitors and nothing is learned until it runs again."
+                                        AutomationProperties.LiveSetting="Assertive"
+                                        AutomationProperties.Name="The background helper isn't running" />
+                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                <ui:Button Content="Start it" Appearance="Primary" Click="StartHelper_Click"
+                                           AutomationProperties.Name="Start the background helper" />
+                                <ui:Button x:Name="HelperReportButton" Content="View report" Margin="8,0,0,0" Click="OpenCrashReport_Click"
+                                           AutomationProperties.Name="View the crash report" />
+                            </StackPanel>
+                        </StackPanel>
+                        <!-- After a crash: say so once, with the local report -->
+                        <StackPanel x:Name="CrashPanel" Visibility="Collapsed" Margin="0,0,0,12">
+                            <ui:InfoBar x:Name="CrashBar" IsOpen="True" IsClosable="False" Severity="Warning"
+                                        Message="A report was saved on this PC. Nothing was sent anywhere. If it keeps happening, you can share the report when you report the problem."
+                                        AutomationProperties.LiveSetting="Polite" />
+                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                <ui:Button Content="Open report" Click="OpenCrashReport_Click" AutomationProperties.Name="Open the crash report" />
+                                <ui:Button Content="Copy" Margin="8,0,0,0" Click="CopyCrashReport_Click" AutomationProperties.Name="Copy the crash report" />
+                                <ui:Button Content="Dismiss" Margin="8,0,0,0" Appearance="Transparent" Click="DismissCrash_Click"
+                                           AutomationProperties.Name="Dismiss the crash message" />
+                            </StackPanel>
+                        </StackPanel>
 
                         <ui:CardControl Icon="{ui:SymbolIcon Symbol=Power24}">
                             <ui:CardControl.Header>
@@ -375,6 +405,10 @@
                         <TextBlock Style="{StaticResource PageTitle}" Text="Monitors" />
                         <TextBlock Style="{StaticResource Secondary}" FontSize="13" Margin="2,0,0,16"
                                    Text="Give your monitors your own names and numbers, and choose the main monitor (where the taskbar clock and Start menu are, and where apps it hasn't learned yet open)." />
+                        <ui:InfoBar x:Name="PolicyMonitorsBar" IsOpen="False" IsClosable="False" Severity="Informational" Margin="0,0,0,12"
+                                    Title="Some settings are managed by your organization"
+                                    Message="Your organization doesn't allow changing the main monitor, so Make main and Keep my main monitor are turned off."
+                                    AutomationProperties.Name="Some settings are managed by your organization" />
                         <!-- How the monitors are arranged; select one to go to its settings -->
                         <ui:Card Padding="16,14" Margin="0,0,0,4">
                             <StackPanel>
@@ -410,7 +444,7 @@
                                                            Visibility="{Binding CanRename, Converter={StaticResource ShowWhenTrue}}"
                                                            AutomationProperties.Name="{Binding Name, StringFormat='Name and number for {0}'}"
                                                            ToolTip="Give this monitor your own name and number, for example &quot;2 · TV&quot;" />
-                                                <ui:Button Content="Make main" Margin="8,0,0,0" Click="MakeMain_Click"
+                                                <ui:Button Content="Make main" Margin="8,0,0,0" Click="MakeMain_Click" IsEnabled="{Binding CanMakeMain}"
                                                            AutomationProperties.Name="{Binding Name, StringFormat='Make {0} the main monitor'}"
                                                            Visibility="{Binding IsPrimary, Converter={StaticResource HideWhenTrue}}"
                                                            ToolTip="Make this the main monitor in Windows (taskbar clock, Start menu, and where new apps open)" />
@@ -492,6 +526,10 @@
                         <TextBlock Style="{StaticResource PageTitle}" Text="Apps" />
                         <TextBlock x:Name="ListTip" Style="{StaticResource Secondary}" FontSize="13" Margin="2,0,0,16"
                                    Text="You don't need to set anything here: just use your apps, and each one is learned after a few seconds on a monitor. Select an app only if you want to choose its monitor yourself." />
+                        <ui:InfoBar x:Name="PolicyAppsBar" IsOpen="False" IsClosable="False" Severity="Informational" Margin="0,0,0,12"
+                                    Title="Some settings are managed by your organization"
+                                    Message="Where some apps open is set by your organization. Those apps say so in the list, and you can't change or forget them."
+                                    AutomationProperties.Name="Some settings are managed by your organization" />
                         <Grid Margin="0,0,0,8">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <ui:TextBox x:Name="SearchBox" PlaceholderText="Search apps" TextChanged="SearchBox_TextChanged"
@@ -567,6 +605,8 @@
                                         <local:MonitorLayoutView x:Name="AllowedLayout" MultiSelect="True" MaxDiagramHeight="90" Margin="0,0,0,8" Visibility="Collapsed"
                                                                  AutomationProperties.Name="Monitors it may open on: monitor layout" />
                                         <ComboBox x:Name="TargetCombo" HorizontalAlignment="Stretch" AutomationProperties.Name="Open it on" SelectionChanged="TargetCombo_SelectionChanged" />
+                                        <TextBlock x:Name="AppPolicyNote" Style="{StaticResource Secondary}" Margin="0,4,0,0" Visibility="Collapsed"
+                                                   Text="Where this app opens is set by your organization." />
                                         <!-- An app that's open now: move its windows there once, without saving -->
                                         <ui:Button x:Name="MoveNowButton" Content="Move its windows there now" Margin="0,8,0,0" Visibility="Collapsed"
                                                    Icon="{ui:SymbolIcon ArrowMove24}" Click="MoveNow_Click"
@@ -687,6 +727,61 @@
                                 </StackPanel>
                             </ui:CardControl.Header>
                             <ui:Button Content="Privacy statement" Click="OpenPrivacy_Click" />
+                        </ui:CardControl>
+
+                        <!-- Backup: export, import and the automatic daily copies -->
+                        <TextBlock Style="{StaticResource SectionHeader}" Text="Backup" />
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=ArrowExportUp24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Export settings" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Save your apps, monitor names and settings to a file, for a new PC or to keep them safe." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button Content="Export…" Click="ExportSettings_Click" AutomationProperties.Name="Export settings" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=ArrowImport24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Import settings" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Use settings you exported before, on this PC or another one. You see what's in the file first, and choose to replace or add to your settings." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button Content="Import…" Click="ImportSettings_Click" AutomationProperties.Name="Import settings" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=History24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Restore a backup" />
+                                    <TextBlock x:Name="BackupHint" Style="{StaticResource Secondary}" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <StackPanel Orientation="Horizontal">
+                                <ComboBox x:Name="BackupCombo" MinWidth="180" AutomationProperties.Name="Backup to restore" PreviewMouseWheel="Combo_PreviewMouseWheel" />
+                                <ui:Button x:Name="RestoreButton" Content="Restore…" Margin="8,0,0,0" Click="RestoreBackup_Click"
+                                           AutomationProperties.Name="Restore the selected backup" />
+                            </StackPanel>
+                        </ui:CardControl>
+
+                        <!-- Troubleshooting -->
+                        <TextBlock Style="{StaticResource SectionHeader}" Text="Troubleshooting" />
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Stethoscope24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Save diagnostics" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Save the activity log, your settings, your monitor setup and any crash reports in one .zip file, to share when you report a problem. You see what's in it first. Nothing is sent." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button Content="Save…" Click="SaveDiagnostics_Click" AutomationProperties.Name="Save diagnostics" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Delete24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Remove from this PC" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Stop Monitor Window Control and remove it, its helper and its shortcuts. You can keep your settings for later. It's also listed in Settings → Apps → Installed apps." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button Content="Remove…" Click="RemoveFromPc_Click" AutomationProperties.Name="Remove from this PC" />
                         </ui:CardControl>
                         <ui:CardControl x:Name="ExitCard" Icon="{ui:SymbolIcon Symbol=SignOut24}">
                             <ui:CardControl.Header>

@@ -18,10 +18,12 @@ public partial class App : Application
 {
     private const string MutexName = @"Local\MonitorWindowControl.SingleInstance";
     private const string ShowEventName = @"Local\MonitorWindowControl.ShowWindow";
+    /// <summary>Set by "--uninstall" to make a running copy exit before it's removed.</summary>
+    private const string ExitEventName = @"Local\MonitorWindowControl.Exit";
 
     private Mutex? _mutex;
-    private EventWaitHandle? _showEvent;
-    private RegisteredWaitHandle? _showWait;
+    private EventWaitHandle? _showEvent, _exitEvent;
+    private RegisteredWaitHandle? _showWait, _exitWait;
     private WpfHost? _host;
     private Engine? _engine;
     private TrayIcon? _tray;
@@ -36,6 +38,15 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        if (e.Args.Any(a => string.Equals(a, Uninstaller.Argument, StringComparison.OrdinalIgnoreCase)))
+        {
+            // Windows Settings → Installed apps → Uninstall (or Remove from this PC in another copy).
+            IsExiting = true;
+            ApplicationThemeManager.ApplySystemTheme(true);
+            UninstallFromCommandLine();
+            return;
+        }
+
         _mutex = Native.TryCreateOwnedMutex(MutexName, out bool firstInstance);
         if (!firstInstance)
         {
@@ -49,7 +60,11 @@ public partial class App : Application
 
         base.OnStartup(e);
         DispatcherUnhandledException += OnUnhandled;
-        AppDomain.CurrentDomain.UnhandledException += (_, a) => Log.Write("FATAL: " + a.ExceptionObject);
+        AppDomain.CurrentDomain.UnhandledException += (_, a) =>
+        {
+            Log.Write("FATAL: " + a.ExceptionObject);
+            CrashReports.Write("Monitor Window Control", true, a.ExceptionObject?.ToString() ?? "", _engine?.Settings, _engine?.Monitors);
+        };
         // The tray icon's menu runs in WinForms, which has its own error path (and would show its own error dialog).
         System.Windows.Forms.Application.SetUnhandledExceptionMode(System.Windows.Forms.UnhandledExceptionMode.CatchException);
         System.Windows.Forms.Application.ThreadException += (_, a) => Log.Write("Unexpected error (tray): " + a.Exception);
@@ -57,6 +72,9 @@ public partial class App : Application
         _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
         _showWait = ThreadPool.RegisterWaitForSingleObject(_showEvent,
             (_, _) => Dispatcher.BeginInvoke(ShowMainWindow), null, Timeout.Infinite, false);
+        _exitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ExitEventName);
+        _exitWait = ThreadPool.RegisterWaitForSingleObject(_exitEvent,
+            (_, _) => Dispatcher.BeginInvoke(ExitApp), null, Timeout.Infinite, true);
 
         // A simple settings window doesn't need the GPU; skipping it keeps the graphics driver
         // (and the ~200 MB it reserves) out of this app.
@@ -69,6 +87,9 @@ public partial class App : Application
         bool firstRun = _engine.Start(importLegacy: true, who: "Monitor Window Control");
         _showWelcome = firstRun;
         StartupManager.RemoveOldNameEntry();
+        // Installed apps entry and launch shortcuts follow the exe if it was moved (see Uninstaller).
+        if (Environment.ProcessPath is string exe) Uninstaller.Register(exe, MonitorWindowControl.MainWindow.AppVersion);
+        if (_engine.Settings.Apps.Any(a => a.ShortcutFile != null) && !System.IO.File.Exists(Paths.HelperExe)) HelperManager.EnsureExtracted();
         // Versions before 1.4 kept "Start with Windows" only in the registry.
         if (_engine.Settings.StartWithWindows == null) _engine.SetStartWithWindows(StartupManager.IsEnabled());
 
@@ -107,7 +128,12 @@ public partial class App : Application
             _tray?.Dispose(); _tray = null;
             if (s.RunMode == RunModes.Helper)
             {
-                if (!HelperManager.EnsureRunning())
+                if (!HelperManager.EnsureRunning() && _engine.Policy.RunMode == RunModes.Helper)
+                {
+                    // Your organization requires the helper: say so (General page → Start it), never switch to the tray.
+                    HelperProblem = "The helper couldn't be started (see the log), and your organization requires it.";
+                }
+                else if (!HelperManager.IsRunning())
                 {
                     // Never leave nothing running by accident: fall back to the tray.
                     string why = HelperManager.IsAvailable ? "the helper couldn't be started (see the log)" : "this build doesn't include the helper";
@@ -122,6 +148,9 @@ public partial class App : Application
         }
 
         if (s.RunMode == RunModes.Helper && s.StartWithWindows == true) HelperManager.EnsureExtracted(); // autostart points at it
+        // After Windows restarts for an update (or this app crashed), the tray app comes back by itself; in the other
+        // modes this app only runs while its window is open, so it doesn't.
+        Native.SetRestartAfterUpdate(s.RunMode == RunModes.Tray ? "--tray" : null);
         StartupManager.Apply(s.RunMode, s.StartWithWindows == true, Environment.ProcessPath ?? "", Paths.HelperExe);
     }
 
@@ -186,12 +215,56 @@ public partial class App : Application
         }
     }
 
-    private bool _errorShown;
+    private bool _errorShown, _reportWritten;
+
+    /// <summary>
+    /// The General page's "Start it" (the helper should be running but isn't). Returns a problem to show, or null.
+    /// </summary>
+    public string? StartHelper()
+    {
+        if (_engine?.Settings.RunMode != RunModes.Helper) return null;
+        if (HelperManager.EnsureRunning()) { HelperProblem = null; Log.Write("Started the helper again (General page)."); return null; }
+        return HelperManager.IsAvailable
+            ? "The helper still doesn't run. The activity log (About page) says why; antivirus software may be stopping it."
+            : "This copy of Monitor Window Control doesn't include the helper.";
+    }
+
+    /// <summary>About → Remove from this PC: asks first, removes everything and exits.</summary>
+    public async void RemoveFromThisPc()
+    {
+        if (_engine == null) return;
+        bool? keep = await Uninstaller.AskAsync();
+        if (keep == null || _engine == null) return;
+        Uninstaller.Remove(keep.Value, _engine.Settings.Apps.ToList());
+        ExitApp();
+    }
+
+    /// <summary>Started with --uninstall: stop a running copy, remove everything, exit.</summary>
+    private async void UninstallFromCommandLine()
+    {
+        try { await Uninstaller.RunFromCommandLineAsync(StopRunningCopy); }
+        catch (Exception ex) { Log.Write("Couldn't remove Monitor Window Control: " + ex); }
+        Shutdown();
+    }
+
+    /// <summary>Asks a running copy of the app to exit, and waits (up to 5 seconds) until it has. False if it's still running.</summary>
+    private static bool StopRunningCopy()
+    {
+        if (!Native.NamedMutexExists(MutexName)) return true;
+        try { using var ev = EventWaitHandle.OpenExisting(ExitEventName); ev.Set(); } catch { }
+        for (int i = 0; i < 100 && Native.NamedMutexExists(MutexName); i++) Thread.Sleep(50);
+        return !Native.NamedMutexExists(MutexName);
+    }
 
     private void OnUnhandled(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
         Log.Write("Unexpected error: " + e.Exception);
         e.Handled = true;
+        if (!_reportWritten) // one report per run is enough to see what went wrong
+        {
+            _reportWritten = true;
+            CrashReports.Write("Monitor Window Control", false, e.Exception.ToString(), _engine?.Settings, _engine?.Monitors);
+        }
         if (_errorShown || _window == null || IsExiting) return; // tell the user once, and only while they're looking
         _errorShown = true;
         try
@@ -299,6 +372,8 @@ public partial class App : Application
         _activateRetry?.Stop();
         _showWait?.Unregister(null); _showWait = null;
         _showEvent?.Dispose(); _showEvent = null;
+        _exitWait?.Unregister(null); _exitWait = null;
+        _exitEvent?.Dispose(); _exitEvent = null;
         _tray?.Dispose(); _tray = null;
         if (_window != null) { var w = _window; _window = null; w.Close(); }
         _engine?.Dispose(); _engine = null;

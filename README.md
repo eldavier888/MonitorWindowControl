@@ -207,6 +207,33 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
   an app, when an app opens on another monitor because its own is off, when a monitor comes back and its windows move
   back, or when it can't move an app that runs as administrator. At most one a day for each app; select one to undo it.
 - **Open activity log**: every move, learn, pin and forget is written to a log with the time.
+- **Backup** (About page): **Export settings** saves your apps, monitor names and settings to a file. **Import settings**
+  shows what's in a file first ("12 apps (4 set by you), 3 monitor names") and lets you **Replace** your settings or
+  **Merge** (add only the apps and monitor names you don't have yet). Its monitors are matched to yours by the monitor
+  itself, then by model name, then main to main; for any it can't find, it asks "Your old "TV": which monitor is it
+  now?". How it runs, Start with Windows and Keep my main monitor stay as they are on this PC. A copy of your settings is
+  also kept by itself each day you use the app (the last 5 days) and before **Forget all** and imports: **Restore a
+  backup** puts one back.
+- **If the helper stops** (helper mode): when the settings window sees that the helper isn't running, the General page
+  says so, with **Start it**. Both programs ask Windows to start them again after Windows restarts for an update (if
+  *Automatically save my restartable apps* is on in Windows) or after a crash.
+- **Crash reports**: if Monitor Window Control or its helper stops after an unexpected error, a short report is saved on
+  this PC (nothing is sent). The next time you open the window, the General page says so, with **Open report** and **Copy**.
+  **Save diagnostics** (About page) puts the activity log, your settings, your monitor setup and the crash reports in one
+  .zip file to share when you report a problem: it lists what's inside first, removes window titles (unless you clear
+  that) and leaves out your app list unless you include it.
+- **Remove from this PC** (About page, or Settings → Apps → Installed apps → Monitor Window Control → Uninstall, where it
+  lists itself without needing admin rights): stops it and its helper, removes it from Start with Windows and Installed
+  apps, deletes its launch shortcuts, its helper and the program file itself. Your settings are kept unless you clear
+  **Keep my settings and app list**. If you move `MonitorWindowControl.exe`, Start with Windows and the Installed apps
+  entry follow it the next time you start it.
+- **Managed by your organization**: IT can preset and lock *Move new windows*, *Learn automatically*, *Apps it hasn't
+  learned yet*, *How it runs*, whether the main monitor may be changed, and where some apps open (the main monitor, never
+  move, or a monitor's model name). Locked choices are greyed out, and the page says "Some settings are managed by your
+  organization". Group Policy templates are in the [`policies`](policies) folder; the values live in
+  `HKLM\SOFTWARE\Policies\MonitorWindowControl` (or `HKCU\...`, for one user): `Enabled`, `LearnAutomatically`,
+  `AllowMakeMain` (DWORD 0 or 1), `UnknownApps` (`main`, `leave` or `mouse`), `RunMode` (`Tray`, `Helper` or
+  `LaunchOnly`), and an `AppRules` key whose value names are apps (`chrome.exe`) and values are `main`, `never` or a model name.
 - Everything works with the keyboard (Tab, arrow keys, Space/Enter) and with Narrator.
 
 How it decides, for each new window (about 0.4 s after it appears, because apps often reposition themselves
@@ -243,15 +270,16 @@ Windows that run as administrator can't be moved by a normal app; Monitor Window
 
 - `settings.json`: settings and the list of apps and their monitors.
 - `monitorwindowcontrol.log`: the activity log (kept to about 1 MB).
+- `settings.YYYYMMDD.json`: the daily backups of `settings.json` (the last 5), for **Restore a backup**.
 
 The tiny helper is unpacked to `%LocalAppData%\MonitorWindowControl\MonitorWindowControlHelper.exe` when a mode
 or shortcut needs it. Next to it, `signin.txt` only notes when you last signed in, so apps that opened while signing in
 are placed once per sign-in, and in helper mode `request.json` and `reply.json` pass Recent activity, *Move open windows*
-and *Undo* between the settings window and the helper (window titles are never written there).
+and *Undo* between the settings window and the helper (window titles are never written there). The `Crashes` folder
+there holds crash reports, if there ever were any (the last 10).
 
-To start completely fresh: in the window, press **Forget all…** (this also deletes your launch shortcuts), turn off
-**Start with Windows**, set **How it runs** to the tray, and press **Exit**. Then delete those two folders and
-Start menu → Monitor Window Control, and start it again.
+To remove it: About → **Remove from this PC**, or Settings → Apps → Installed apps. To start completely fresh instead,
+use **Remove from this PC** with **Keep my settings and app list** cleared, then download it again.
 
 ## Build it yourself (optional)
 
@@ -266,7 +294,7 @@ You only need this if you change the code.
 ```
 
 The result is `publish\MonitorWindowControl.exe` (about 8 MB, needs the .NET Desktop Runtime 8 or newer;
-the 2.4 MB native helper is packed inside it).
+the 3 MB native helper is packed inside it).
 
 Project layout:
 
@@ -282,6 +310,10 @@ Project layout:
 - `MonitorWindowControl\HelperManager.cs`, `ShortcutManager.cs`: unpacking/starting the helper; launch shortcuts
 - `MonitorWindowControlHelper\`: the tiny native helper (`Program.cs`: background and `--launch` modes;
   `NativeHost.cs`: its Windows message loop)
+- `MonitorWindowControl\Policy.cs`, `CrashReports.cs` (shared): organisation policies; local crash reports
+- `MonitorWindowControl\SettingsTransfer.cs`, `Diagnostics.cs`, `Uninstaller.cs`: import with monitor matching,
+  Save diagnostics, Installed apps entry and Remove from this PC
+- `policies\`: Group Policy templates (ADMX and ADML)
 - `MonitorWindowControl\tools\make-icon.ps1`: regenerates `app.ico`
 
 Tech: C# / .NET 8, WPF with the WPF-UI library (Windows 11 Fluent look, Mica, follows light/dark mode),

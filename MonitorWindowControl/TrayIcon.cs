@@ -87,6 +87,7 @@ internal sealed class TrayIcon : IDisposable
     {
         bool on = _engine.Settings.Enabled;
         _enabledItem.Checked = on;
+        _enabledItem.Enabled = _engine.Policy.Enabled == null; // (set by your organization)
         string tip = !on ? "Monitor Window Control (paused)"
             : _engine.IsPausedForRemoteDesktop ? "Monitor Window Control (paused: Remote Desktop)"
             : _engine.IsPausedForGame ? "Monitor Window Control (paused: game running)" : "Monitor Window Control";

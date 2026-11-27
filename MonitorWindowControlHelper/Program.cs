@@ -24,9 +24,13 @@ internal static class Program
     private const int LaunchAlreadyOpenWaitMs = 6_000; // app was already running: it may just reuse its window
     private const int LaunchQuietMs = 4_000;           // after a window is placed, wait this long for more (splash → main window)
 
+    /// <summary>The engine that's running, for a crash report (null before it starts).</summary>
+    private static Engine? _engine;
+
     [STAThread]
     private static int Main(string[] args)
     {
+        AppDomain.CurrentDomain.UnhandledException += (_, a) => Crashed(a.ExceptionObject as Exception);
         try
         {
             int i = Array.IndexOf(args, "--launch");
@@ -36,9 +40,17 @@ internal static class Program
         catch (Exception ex)
         {
             Log.Write("Helper stopped after an error: " + ex.Message);
+            Crashed(ex);
             return 1;
         }
     }
+
+    /// <summary>
+    /// Writes a local crash report. (The helper is built without stack traces to stay small, so the report has the
+    /// error and what was going on, not the line it happened on.)
+    /// </summary>
+    private static void Crashed(Exception? ex) =>
+        CrashReports.Write("Helper", true, ex?.ToString() ?? "Unknown error", _engine?.Settings, _engine?.Monitors);
 
     private static string? ArgAfter(string[] args, string name)
     {
@@ -56,6 +68,7 @@ internal static class Program
         using var exitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, HelperExitEventName);
         using var host = new NativeHost();
         using var engine = new Engine(host);
+        _engine = engine;
         host.DisplayChanged = engine.OnDisplaySettingsChanged;
         host.SessionChanged = engine.OnSessionChanged;
         host.LockChanged = engine.OnSessionLock;
@@ -68,6 +81,9 @@ internal static class Program
             Log.Write("Helper: the app isn't set to run as a helper, so the helper exits.");
             return 0;
         }
+
+        // Come back after Windows restarts for an update, or after a crash (a clean exit is never restarted).
+        Native.SetRestartAfterUpdate("--background");
 
         // Stop when the settings window switches to another mode, or asks us to.
         engine.Changed += () => { if (engine.Settings.RunMode != RunModes.Helper) host.Quit(); };

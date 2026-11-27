@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Group Policy template for Monitor Window Control. Copy this file to C:\Windows\PolicyDefinitions (or your central
+  store) and en-US\MonitorWindowControl.adml to the en-US folder there. The settings appear under
+  Administrative Templates > Monitor Window Control, for computers and for users. A computer setting wins over a user one.
+-->
+<policyDefinitions xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   revision="1.0" schemaVersion="1.0" xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
+  <policyNamespaces>
+    <target prefix="mwc" namespace="MonitorWindowControl.Policies" />
+  </policyNamespaces>
+  <resources minRequiredRevision="1.0" />
+  <supportedOn>
+    <definitions>
+      <definition name="SUPPORTED_MWC16" displayName="$(string.SUPPORTED_MWC16)" />
+    </definitions>
+  </supportedOn>
+  <categories>
+    <category name="MonitorWindowControl" displayName="$(string.Category)" />
+  </categories>
+  <policies>
+    <policy name="Enabled" class="Both" displayName="$(string.Enabled)" explainText="$(string.Enabled_Help)"
+            key="SOFTWARE\Policies\MonitorWindowControl" valueName="Enabled">
+      <parentCategory ref="MonitorWindowControl" />
+      <supportedOn ref="SUPPORTED_MWC16" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+    <policy name="LearnAutomatically" class="Both" displayName="$(string.LearnAutomatically)" explainText="$(string.LearnAutomatically_Help)"
+            key="SOFTWARE\Policies\MonitorWindowControl" valueName="LearnAutomatically">
+      <parentCategory ref="MonitorWindowControl" />
+      <supportedOn ref="SUPPORTED_MWC16" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+    <policy name="AllowMakeMain" class="Both" displayName="$(string.AllowMakeMain)" explainText="$(string.AllowMakeMain_Help)"
+            key="SOFTWARE\Policies\MonitorWindowControl" valueName="AllowMakeMain">
+      <parentCategory ref="MonitorWindowControl" />
+      <supportedOn ref="SUPPORTED_MWC16" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+    <policy name="UnknownApps" class="Both" displayName="$(string.UnknownApps)" explainText="$(string.UnknownApps_Help)"
+            presentation="$(presentation.UnknownApps)" key="SOFTWARE\Policies\MonitorWindowControl">
+      <parentCategory ref="MonitorWindowControl" />
+      <supportedOn ref="SUPPORTED_MWC16" />
+      <elements>
+        <enum id="UnknownAppsList" valueName="UnknownApps" required="true">
+          <item displayName="$(string.UnknownMain)"><value><string>main</string></value></item>
+          <item displayName="$(string.UnknownLeave)"><value><string>leave</string></value></item>
+          <item displayName="$(string.UnknownMouse)"><value><string>mouse</string></value></item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="RunMode" class="Both" displayName="$(string.RunMode)" explainText="$(string.RunMode_Help)"
+            presentation="$(presentation.RunMode)" key="SOFTWARE\Policies\MonitorWindowControl">
+      <parentCategory ref="MonitorWindowControl" />
+      <supportedOn ref="SUPPORTED_MWC16" />
+      <elements>
+        <enum id="RunModeList" valueName="RunMode" required="true">
+          <item displayName="$(string.RunTray)"><value><string>Tray</string></value></item>
+          <item displayName="$(string.RunHelper)"><value><string>Helper</string></value></item>
+          <item displayName="$(string.RunLaunchOnly)"><value><string>LaunchOnly</string></value></item>
+        </enum>
+      </elements>
+    </policy>
+    <policy name="AppRules" class="Both" displayName="$(string.AppRules)" explainText="$(string.AppRules_Help)"
+            presentation="$(presentation.AppRules)" key="SOFTWARE\Policies\MonitorWindowControl\AppRules">
+      <parentCategory ref="MonitorWindowControl" />
+      <supportedOn ref="SUPPORTED_MWC16" />
+      <elements>
+        <list id="AppRulesList" key="SOFTWARE\Policies\MonitorWindowControl\AppRules" explicitValue="true" />
+      </elements>
+    </policy>
+  </policies>
+</policyDefinitions>

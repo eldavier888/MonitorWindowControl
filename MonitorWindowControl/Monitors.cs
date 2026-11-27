@@ -94,6 +94,9 @@ public sealed class MonitorInfo
     /// <summary>Another monitor is connected too, so choices that send windows elsewhere make sense (set by the engine).</summary>
     public bool HasOtherMonitors { get; set; }
 
+    /// <summary>"Make main" can be used (false when your organization doesn't allow changing the main monitor).</summary>
+    public bool CanMakeMain { get; set; } = true;
+
     /// <summary>Show "Treat as switched off" and "What can open here" for this monitor.</summary>
     public bool ShowMonitorChoices => HasOtherMonitors && !IsDuplicated;
 

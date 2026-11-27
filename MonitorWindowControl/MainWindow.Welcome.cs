@@ -213,6 +213,8 @@ public partial class MainWindow
         WelcomeModeLaunchOnly.IsChecked = s.RunMode == RunModes.LaunchOnly;
         WelcomeStartupToggle.IsChecked = s.StartWithWindows == true;
         WelcomeModeHelper.IsEnabled = HelperManager.IsAvailable || s.RunMode == RunModes.Helper;
+        if (_engine.Policy.RunMode != null) // set by your organization
+            foreach (var r in new[] { WelcomeModeTray, WelcomeModeHelper, WelcomeModeLaunchOnly }) r.IsEnabled = r.IsChecked == true;
         foreach (var r in new[] { WelcomeModeTray, WelcomeModeHelper, WelcomeModeLaunchOnly })
         {
             r.Checked -= WelcomeMode_Checked;

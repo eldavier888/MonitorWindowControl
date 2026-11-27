@@ -344,6 +344,8 @@ Store or other infrastructure). Effort: S / M / L / XL.
 
 ### 22. Export, import and automatic backups of settings
 
+**Status:** built in v1.6.0
+
 *Data · effort M*
 
 **Problem.** A new PC, a Windows reinstall, or 'Forget all' clicked by accident means re-learning everything. Settings live only in %AppData%\MonitorWindowControl\settings.json, and reset is all or nothing.
@@ -355,6 +357,8 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** An imported file is untrusted: parse it into the typed model with the existing repair logic, cap its size, and reject unknown run modes. Rotation happens in SettingsStore under the existing cross-process lock.
 
 ### 23. Restart the background helper if it stops, and say when it isn't running
+
+**Status:** partly built: the Task Scheduler task (restart on failure) isn't made; the Run key stays, with RegisterApplicationRestart in both programs and the General page's Start it
 
 *Stability · effort M*
 
@@ -368,6 +372,8 @@ Store or other infrastructure). Effort: S / M / L / XL.
 
 ### 24. Local crash reports and a 'Save diagnostics' bundle (no telemetry)
 
+**Status:** partly built: StackTraceSupport stays off in the helper (to keep it small), so helper reports have the error but no stack trace; the monitor dump is the app's own monitor list, not a raw QueryDisplayConfig dump
+
 *Supportability · effort M*
 
 **Problem.** Crashes produce only a 'FATAL:' line in a 1 MB rolling log that may already have rolled over. The NativeAOT helper is built with StackTraceSupport=false, so its crashes have no stack trace.
@@ -379,6 +385,8 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** No network, so PRIVACY.md stays true; update it to mention the crash folder. Check that the helper size increase is acceptable for the '5 MB' promise.
 
 ### 25. Installed Apps entry and one-click 'Remove from this PC'
+
+**Status:** partly built: the optional 'Install for this user' button isn't made
 
 *Install · effort M*
 
@@ -503,6 +511,8 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Low. Uses the existing Pending timings per rule. Keep 'Keep correcting' bounded so the 'never fights you' promise holds.
 
 ### 35. Organisation policies (preset or lock settings through the registry)
+
+**Status:** built in v1.6.0
 
 *Enterprise · effort M*
 

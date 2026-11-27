@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                           revision="1.0" schemaVersion="1.0" xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions">
+  <displayName>Monitor Window Control</displayName>
+  <description>Settings for Monitor Window Control, which opens each app's windows on the monitor it's used on.</description>
+  <resources>
+    <stringTable>
+      <string id="Category">Monitor Window Control</string>
+      <string id="SUPPORTED_MWC16">Monitor Window Control 1.6 or later</string>
+
+      <string id="Enabled">Move new windows</string>
+      <string id="Enabled_Help">Enabled: new windows are moved to their app's monitor, and people can't turn this off.
+
+Disabled: no window is moved and nothing is learned (for example on shared PCs), and people can't turn it on.
+
+Not configured: people choose in the app (General page, Move new windows).</string>
+
+      <string id="LearnAutomatically">Learn automatically</string>
+      <string id="LearnAutomatically_Help">Enabled: the monitor where an app is used becomes the monitor it opens on.
+
+Disabled: nothing is learned; apps open where they're set to open, or where apps it hasn't learned yet open.
+
+Not configured: people choose in the app.</string>
+
+      <string id="AllowMakeMain">Allow changing the main monitor</string>
+      <string id="AllowMakeMain_Help">Disabled: Make main and Keep my main monitor can't change which monitor is the main display in Windows.
+
+Enabled or not configured: people can use them.</string>
+
+      <string id="UnknownApps">Apps it hasn't learned yet</string>
+      <string id="UnknownApps_Help">Where windows of apps without a monitor open: on the main monitor, where Windows puts them, or on the monitor with the mouse pointer.
+
+Not configured: people choose in the app.</string>
+      <string id="UnknownMain">Open on the main monitor</string>
+      <string id="UnknownLeave">Leave where Windows puts them</string>
+      <string id="UnknownMouse">Open on the monitor with the mouse pointer</string>
+
+      <string id="RunMode">How it runs</string>
+      <string id="RunMode_Help">In the tray: the app stays in the notification area and places every new window.
+
+Small background helper: a small helper with no window or tray icon places every new window.
+
+Nothing in the background: apps are placed only when opened from the launch shortcuts the app makes.
+
+Not configured: people choose in the app.</string>
+      <string id="RunTray">In the tray</string>
+      <string id="RunHelper">Small background helper</string>
+      <string id="RunLaunchOnly">Nothing in the background</string>
+
+      <string id="AppRules">Where apps open</string>
+      <string id="AppRules_Help">Sets where some apps open. People can see these apps on the Apps page but can't change or forget them.
+
+Value name: the app, as the Apps page shows it under its name (for example chrome.exe, or "Netflix (Store app)").
+
+Value: main (the main monitor), never (never move this app), or a monitor's model name as the Monitors page shows it (for example DELL U2723QE).</string>
+    </stringTable>
+    <presentationTable>
+      <presentation id="UnknownApps">
+        <dropdownList refId="UnknownAppsList" defaultItem="0">Open them:</dropdownList>
+      </presentation>
+      <presentation id="RunMode">
+        <dropdownList refId="RunModeList" defaultItem="0">How it runs:</dropdownList>
+      </presentation>
+      <presentation id="AppRules">
+        <listBox refId="AppRulesList">Apps (value name) and where they open (value):</listBox>
+      </presentation>
+    </presentationTable>
+  </resources>
+</policyDefinitionResources>

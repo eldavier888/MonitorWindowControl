@@ -48,6 +48,8 @@
     <Compile Include="..\MonitorWindowControl\Storage.cs" Link="Shared\Storage.cs" />
     <Compile Include="..\MonitorWindowControl\Engine.cs" Link="Shared\Engine.cs" />
     <Compile Include="..\MonitorWindowControl\Host.cs" Link="Shared\Host.cs" />
+    <Compile Include="..\MonitorWindowControl\Policy.cs" Link="Shared\Policy.cs" />
+    <Compile Include="..\MonitorWindowControl\CrashReports.cs" Link="Shared\CrashReports.cs" />
   </ItemGroup>
 
 </Project>

@@ -101,6 +101,7 @@ public partial class MainWindow : FluentWindow
             {
                 if (!_engine.ReloadIfChanged()) RefreshAppList(background: true); // a reload refreshes everything itself
                 BackgroundStatusText.Text = _app.BackgroundStatus();
+                UpdateHelperBar();
                 UpdatePauseInfo(); // (in helper mode, a game starting or ending is only seen here)
                 UpdateNavStatus();
                 if (PageGeneral.Visibility == Visibility.Visible) _ = RefreshStatusAsync();
@@ -141,6 +142,9 @@ public partial class MainWindow : FluentWindow
         SettingsFolderText.Text = Paths.Dir;
         NavList.SelectedIndex = 0;
         Refresh();
+        UpdateHelperBar();
+        ShowCrashIfAny();
+        FillBackups();
     }
 
     private bool? _wide;
@@ -211,6 +215,7 @@ public partial class MainWindow : FluentWindow
         PageScroller.ScrollToTop();
         IdentifyOverlay.HideOutline();
         if (page == "General" && _engine != null) _ = RefreshStatusAsync();
+        if (page == "About" && _engine != null) FillBackups();
     }
 
     private static void OpenUri(string uri)
@@ -270,6 +275,11 @@ public partial class MainWindow : FluentWindow
             var s = _engine.Settings;
             EnabledToggle.IsChecked = s.Enabled;
             LearnToggle.IsChecked = s.LearnAutomatically;
+            var policy = _engine.Policy;
+            EnabledToggle.IsEnabled = policy.Enabled == null;
+            UnknownCombo.IsEnabled = policy.UnknownApps == null;
+            RunModeCombo.IsEnabled = policy.RunMode == null;
+            UpdatePolicyBars();
             StartupToggle.IsChecked = s.StartWithWindows == true;
             UnknownCombo.SelectedIndex = s.UnknownFollowMouse ? 2 : s.MoveUnknownToMain ? 0 : 1;
             RemoteCombo.SelectedIndex = s.PauseDuringRemoteDesktop ? 0 : 1;
@@ -309,7 +319,7 @@ public partial class MainWindow : FluentWindow
             DialogsHint.Text = launchOnly
                 ? "Needs something running in the background to notice dialogs opening."
                 : "Save, Print and other small windows that open on another monitor than their app move over the app's window. They're never resized.";
-            LearnToggle.IsEnabled = !launchOnly;
+            LearnToggle.IsEnabled = !launchOnly && policy.LearnAutomatically == null;
             LearnHint.Text = launchOnly
                 ? "Needs something running in the background to notice where you use apps; set apps' monitors on the Apps page instead."
                 : "When you use an app on a monitor for a few seconds, that becomes its home. Only the window you're using counts.";
@@ -332,7 +342,8 @@ public partial class MainWindow : FluentWindow
             FillDefaultFallback();
 
             // Rebuild the monitor cards only when monitors (or their names) actually changed.
-            string sig = string.Join("|", _engine.Monitors.Select(m => $"{m.DeviceName}={m.Label}/{m.Details}/{m.ShowTemporaryOption}{m.IsTemporary}" +
+            foreach (var m in _engine.Monitors) m.CanMakeMain = policy.MakeMainAllowed;
+            string sig = policy.MakeMainAllowed + string.Join("|", _engine.Monitors.Select(m => $"{m.DeviceName}={m.Label}/{m.Details}/{m.ShowTemporaryOption}{m.IsTemporary}" +
                                                                        $"/{m.ShowMonitorChoices}{m.SwitchedOffNote}{m.OpenHereIndex}"));
             if (sig != _monitorSig) { _monitorSig = sig; MonitorsList.ItemsSource = _engine.Monitors.ToList(); }
             MonitorLayout.SetMonitors(_engine.Monitors);
@@ -424,7 +435,8 @@ public partial class MainWindow : FluentWindow
         var (name, detail) = Names(r.Key, r.DisplayName);
         if (!r.NeverMove && r.Place == PlaceModes.Maximized) opensOn += ", maximized";
         else if (!r.NeverMove && r.Place == PlaceModes.Last) opensOn += ", where you had it";
-        return new AppRow(r.Key, name, detail, opensOn, r.Pinned || r.NeverMove ? "Set by you" : "Learned",
+        string source = _engine.Policy.IsAppLocked(r.Key) ? "Set by your organization" : r.Pinned || r.NeverMove ? "Set by you" : "Learned";
+        return new AppRow(r.Key, name, detail, opensOn, source,
                           open?.Monitor?.DeviceName, r.MovedItselfBack && !r.NeverMove ? StubbornTip : null);
     }
 
@@ -440,7 +452,12 @@ public partial class MainWindow : FluentWindow
         var row = AppsList.SelectedItem as AppRow;
         var rule = row == null ? null : _engine.Settings.Find(row.Key);
         SelectionPanel.IsEnabled = row != null;
-        ForgetButton.IsEnabled = rule != null;
+        bool locked = row != null && _engine.Policy.IsAppLocked(row.Key); // where it opens is set by your organization
+        ForgetButton.IsEnabled = rule != null && !locked;
+        TargetCombo.IsEnabled = !locked;
+        TargetLayout.IsEnabled = !locked;
+        AllowedPanel.IsEnabled = !locked;
+        AppPolicyNote.Visibility = locked ? Visibility.Visible : Visibility.Collapsed;
         SelectedAppName.Text = row?.Name ?? "No app selected";
         SelectedAppDetail.Text = row == null ? "Select an app in the list." :
             string.Join(" · ", new[] { row.Detail, row.Source }.Where(x => !string.IsNullOrEmpty(x)));
@@ -688,11 +705,13 @@ public partial class MainWindow : FluentWindow
         var s = _engine.Settings;
         KeepMainCard.Visibility = _engine.Monitors.Count > 1 || s.KeepMainMonitor != null ? Visibility.Visible : Visibility.Collapsed;
         KeepMainToggle.IsChecked = s.KeepMainMonitor != null;
-        KeepMainToggle.IsEnabled = !launchOnly;
+        KeepMainToggle.IsEnabled = !launchOnly && _engine.Policy.MakeMainAllowed;
         string kept = s.KeepMainMonitor == null ? ""
             : _engine.FindMonitor(s.KeepMainMonitor)?.Name ?? $"{s.KeepMainMonitor.Name ?? s.KeepMainMonitor.Device} (not connected)";
         KeepMainHint.Text = launchOnly
             ? "Needs something running in the background to notice Windows changing the main monitor."
+            : !_engine.Policy.MakeMainAllowed
+                ? "Your organization doesn't allow changing the main monitor."
             : s.KeepMainMonitor == null
                 ? $"If Windows makes another monitor the main one (after a reconnect, an update or a TV waking up), change it back to {_engine.MainMonitor?.Name ?? "this one"}."
                 : _engine.KeepMainStopped
@@ -1070,7 +1089,7 @@ public partial class MainWindow : FluentWindow
         var box = new Wpf.Ui.Controls.MessageBox
         {
             Title = "Forget all apps?",
-            Content = $"Monitor Window Control will forget where all {_engine.Settings.Apps.Count} apps open, including the ones you set yourself. It will start learning again from scratch.",
+            Content = $"Monitor Window Control will forget where all {_engine.Settings.Apps.Count} apps open, including the ones you set yourself. It will start learning again from scratch. A copy of your settings is kept first (About → Restore a backup).",
             PrimaryButtonText = "Forget all",
             CloseButtonText = "Cancel",
         };

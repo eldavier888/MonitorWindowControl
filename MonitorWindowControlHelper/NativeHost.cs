@@ -177,9 +177,16 @@ internal sealed class NativeHost : IEngineHost, IDisposable
         catch (Exception ex)
         {
             Log.Write("Helper error: " + ex.Message);
+            if (!_errorReported) // the helper keeps running; one report per run is enough
+            {
+                _errorReported = true;
+                CrashReports.Write("Helper", false, ex.ToString(), null, null);
+            }
         }
         return DefWindowProc(hwnd, msg, wParam, lParam);
     }
+
+    private bool _errorReported;
 
     public void Dispose()
     {

@@ -142,6 +142,8 @@ public sealed class Engine : IDisposable
     private bool _started, _disposed, _learning;
 
     public AppSettings Settings { get; private set; } = new();
+    /// <summary>Settings your organisation manages (read at startup and whenever settings are re-read); they're locked.</summary>
+    public PolicySettings Policy { get; private set; } = new();
     public IReadOnlyList<MonitorInfo> Monitors => _monitors;
     public MonitorInfo? MainMonitor => _monitors.FirstOrDefault(m => m.IsPrimary) ?? _monitors.FirstOrDefault();
 
@@ -317,6 +319,7 @@ public sealed class Engine : IDisposable
             Save();
         }
         _started = true;
+        ApplyPolicy(save: true);
         if (importLegacy) ForgetLearnedOneOffApps();
         Log.Write($"{who} started (mode={Settings.RunMode}, enabled={Settings.Enabled}, learn={Settings.LearnAutomatically}, " +
                   $"unknown apps={(Settings.MoveUnknownToMain ? "main monitor" : "leave")}, admin={_selfElevated}).");
@@ -532,9 +535,26 @@ public sealed class Engine : IDisposable
         Settings = fresh;
         _monitorSignature = ""; // names/numbers may have changed
         RefreshMonitors();
+        ApplyPolicy(save: false);
         ResetStreak();
         Changed?.Invoke();
         return true;
+    }
+
+    /// <summary>
+    /// Reads your organisation's policies again and puts them over the settings. With <paramref name="save"/>, a change is
+    /// saved too (at startup), so the other program sees the same values.
+    /// </summary>
+    private void ApplyPolicy(bool save)
+    {
+        Policy = Policies.Read();
+        if (!Policy.HasAny) return;
+        if (!save) { Policies.Apply(Settings, Policy, _monitors, MainMonitor); return; }
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (!Policies.Apply(Settings, Policy, _monitors, MainMonitor)) return;
+        Save();
+        Log.Write("Applied the settings your organization manages.");
     }
 
     // ------------------------------------------------------------------ monitors
@@ -2730,7 +2750,7 @@ public sealed class Engine : IDisposable
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
-        if (Settings.Enabled == on) return;
+        if (Settings.Enabled == on || Policy.Enabled != null) return; // (managed by your organization: locked)
         Settings.Enabled = on; Save();
         Log.Write(on ? "Enabled." : "Disabled.");
         Changed?.Invoke();
@@ -2740,7 +2760,7 @@ public sealed class Engine : IDisposable
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
-        if (Settings.LearnAutomatically == on) return;
+        if (Settings.LearnAutomatically == on || Policy.LearnAutomatically != null) return;
         Settings.LearnAutomatically = on; Save(); ResetStreak();
         Log.Write("Learn automatically: " + (on ? "on" : "off"));
         Changed?.Invoke();
@@ -2756,6 +2776,7 @@ public sealed class Engine : IDisposable
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
+        if (Policy.UnknownApps != null) return;
         toMain |= followMouse;
         if (Settings.MoveUnknownToMain == toMain && Settings.UnknownFollowMouse == followMouse) return;
         Settings.MoveUnknownToMain = toMain;
@@ -2808,6 +2829,7 @@ public sealed class Engine : IDisposable
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
+        if (Policy.IsAppLocked(key)) return;
         var undo = PinCore(key, monitor, displayName, out var rule, out int n);
         string moved = n == 0 ? "" : n == 1 ? " Its open window was moved there." : $" Its {n} open windows were moved there.";
         string text = monitor == null ? $"Never move {rule.DisplayName}" : $"{rule.DisplayName} opens on {monitor.Name}";
@@ -2860,6 +2882,7 @@ public sealed class Engine : IDisposable
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
+        if (Policy.IsAppLocked(key)) return;
         var rule = RuleToChange(key, displayName, out var undo);
         rule.LaunchTarget ??= FindLaunchTarget(key);
         rule.Pinned = true;
@@ -2888,6 +2911,7 @@ public sealed class Engine : IDisposable
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
+        if (Policy.IsAppLocked(key)) return;
         var rule = RuleToChange(key, displayName, out var undo);
         rule.LaunchTarget ??= FindLaunchTarget(key);
         rule.Pinned = true;
@@ -2983,6 +3007,7 @@ public sealed class Engine : IDisposable
     /// <summary>Makes a monitor the main display in Windows (see <see cref="SetMainMonitor"/>). Returns an error message, or null.</summary>
     private string? ChangeMainMonitor(MonitorInfo target)
     {
+        if (!Policy.MakeMainAllowed) return "Your organization doesn't allow changing the main monitor.";
         var dm = NewDevMode();
         if (!Native.EnumDisplaySettings(target.DeviceName, Native.ENUM_CURRENT_SETTINGS, ref dm))
             return "Windows didn't return the settings of that monitor.";
@@ -3130,7 +3155,7 @@ public sealed class Engine : IDisposable
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
         var main = MainMonitor;
-        if (on && main == null) return;
+        if (on && (main == null || !Policy.MakeMainAllowed)) return;
         Settings.KeepMainMonitor = on ? RefTo(main!) : null;
         Settings.KeepMainStopped = false; _mainFixes.Clear();
         Save();
@@ -3256,7 +3281,7 @@ public sealed class Engine : IDisposable
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
         mode = RunModes.Normalize(mode);
-        if (Settings.RunMode == mode) return;
+        if (Settings.RunMode == mode || (Policy.RunMode != null && Policy.RunMode != mode)) return;
         Settings.RunMode = mode; Save();
         Log.Write("How it runs: " + mode);
         Changed?.Invoke();
@@ -3346,7 +3371,7 @@ public sealed class Engine : IDisposable
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
         var rule = Settings.Find(key);
-        if (rule == null) return;
+        if (rule == null || Policy.IsAppLocked(key)) return;
         Settings.Apps.Remove(rule);
         Save(); ResetStreak();
         Note($"Forgot {rule.DisplayName}.", $"[{rule.Key}]");
@@ -3357,10 +3382,48 @@ public sealed class Engine : IDisposable
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
-        int n = Settings.Apps.Count;
-        Settings.Apps.Clear();
+        SettingsStore.WriteBackup(force: true); // "Forget all" can always be undone with Restore a backup
+        int n = Settings.Apps.Count(a => !Policy.IsAppLocked(a.Key));
+        Settings.Apps.RemoveAll(a => !Policy.IsAppLocked(a.Key)); // (apps your organization sets stay)
         Save(); ResetStreak();
         Note($"Forgot all {n} apps.", "");
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// "Export settings": writes your settings to <paramref name="file"/>, with this PC's main monitor noted so an import
+    /// on another PC can match it. Returns an error message, or null.
+    /// </summary>
+    public string? ExportSettings(string file)
+    {
+        var copy = SettingsStore.Copy(Settings);
+        copy.ExportedMainMonitor = MainMonitor is MonitorInfo main ? RefTo(main) : null;
+        return SettingsStore.Export(copy, file);
+    }
+
+    /// <summary>
+    /// "Import settings" and "Restore a backup": <paramref name="build"/> gets a copy of the current settings and returns
+    /// the new ones. A backup of the current settings is kept first. How it runs, Start with Windows and Keep my main
+    /// monitor belong to this PC and stay as they are; settings your organization manages are put back over the result.
+    /// </summary>
+    public void ImportSettings(Func<AppSettings, AppSettings> build, string note)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        SettingsStore.WriteBackup(force: true);
+        var result = build(SettingsStore.Copy(Settings));
+        result.RunMode = Settings.RunMode;
+        result.StartWithWindows = Settings.StartWithWindows;
+        result.KeepMainMonitor = Settings.KeepMainMonitor;
+        result.KeepMainStopped = Settings.KeepMainStopped;
+        result.ExportedMainMonitor = null;
+        Settings = result;
+        Policies.Apply(Settings, Policy, _monitors, MainMonitor);
+        Save();
+        _monitorSignature = ""; // names and numbers may have changed
+        RefreshMonitors();
+        ResetStreak();
+        Note(note, "");
         Changed?.Invoke();
     }
 

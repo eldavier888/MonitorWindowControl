@@ -293,6 +293,27 @@ public static class Native
         catch (UnauthorizedAccessException) { createdNew = false; return null; }
     }
 
+    // ---------- Coming back after Windows restarts for an update (and after a crash) ----------
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int RegisterApplicationRestart(string? commandLine, int flags);
+    [DllImport("kernel32.dll")]
+    private static extern int UnregisterApplicationRestart();
+
+    /// <summary>
+    /// Asks Windows to start this program again with <paramref name="arguments"/> after it restarts for an update (when
+    /// "restartable apps" is on) or after the program crashed (once it ran a minute, so a crash loop can't happen).
+    /// Null arguments = don't restart it. A clean exit never restarts it.
+    /// </summary>
+    public static void SetRestartAfterUpdate(string? arguments)
+    {
+        try
+        {
+            if (arguments == null) UnregisterApplicationRestart();
+            else RegisterApplicationRestart(arguments, 0);
+        }
+        catch (Exception) { /* not critical */ }
+    }
+
     public const uint CDS_UPDATEREGISTRY = 0x00000001;
 
     [DllImport("kernel32.dll")]
