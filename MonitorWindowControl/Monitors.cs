@@ -82,6 +82,39 @@ public sealed class MonitorInfo
     /// <summary>How it's told apart from another monitor of the same model, or null (set by the engine).</summary>
     public string? IdentityNote { get; set; }
 
+    /// <summary>"Treat as switched off" is on: new windows open elsewhere and nothing is learned here (set by the engine).</summary>
+    public bool IsSwitchedOff { get; set; }
+
+    /// <summary>When "switched off" ends by itself, or null for "until I turn it back on" (set by the engine).</summary>
+    public DateTime? SwitchedOffUntilUtc { get; set; }
+
+    /// <summary>"What can open here: only apps I choose" (set by the engine).</summary>
+    public bool OnlyChosenApps { get; set; }
+
+    /// <summary>Another monitor is connected too, so choices that send windows elsewhere make sense (set by the engine).</summary>
+    public bool HasOtherMonitors { get; set; }
+
+    /// <summary>Show "Treat as switched off" and "What can open here" for this monitor.</summary>
+    public bool ShowMonitorChoices => HasOtherMonitors && !IsDuplicated;
+
+    /// <summary>The "Treat as switched off" choice: 0 = no, 1 = until I turn it back on, 2 = for a while.</summary>
+    public int SwitchedOffIndex => !IsSwitchedOff ? 0 : SwitchedOffUntilUtc == null ? 1 : 2;
+
+    /// <summary>The "What can open here" choice: 0 = any app, 1 = only apps I choose.</summary>
+    public int OpenHereIndex => OnlyChosenApps ? 1 : 0;
+
+    /// <summary>The description under "Treat as switched off".</summary>
+    public string SwitchedOffNote => !IsSwitchedOff
+        ? "For a TV that stays connected when you turn it off with its remote. New windows open on another monitor instead, and move back here when you choose No."
+        : SwitchedOffUntilUtc is DateTime until
+            ? $"Switched off (set by you) until {until.ToLocalTime():t}. New windows open on another monitor, and nothing is learned here."
+            : "Switched off (set by you) until you turn it back on. New windows open on another monitor, and nothing is learned here.";
+
+    /// <summary>The description under "What can open here".</summary>
+    public string OpenHereNote => OnlyChosenApps
+        ? "Only apps you set to open here on the Apps page open here. Other apps aren't learned here, and their new windows move to their own monitor or the main monitor."
+        : "Choose \"Only apps I choose\" to keep this monitor for a few apps, like streaming apps on a TV.";
+
     /// <summary>The name to show: "2 · TV" style when numbered, your name for it, else the model name.</summary>
     public string Name => (Number is int n ? $"{n} · " : "") +
         (IsDuplicated ? string.Join(" + ", Targets.Select(t => t.ShownName)) + " (duplicated)" : Targets[0].ShownName);
@@ -104,6 +137,8 @@ public sealed class MonitorInfo
             if (IsDuplicated)
                 text += "\nThese monitors show the same picture (Duplicate in Windows). Apps aren't learned while monitors are duplicated.";
             if (IsTemporary) text += "\nTemporary monitor: apps aren't learned here.";
+            if (IsSwitchedOff) text += "\nSwitched off (set by you): new windows open on another monitor.";
+            if (OnlyChosenApps) text += "\nOnly apps you choose open here.";
             if (IdentityNote != null) text += "\n" + IdentityNote;
             return text;
         }

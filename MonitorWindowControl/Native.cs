@@ -13,6 +13,7 @@ public static class Native
 
     public const uint EVENT_OBJECT_DESTROY = 0x8001;
     public const uint EVENT_OBJECT_SHOW = 0x8002;
+    public const uint EVENT_SYSTEM_MOVESIZEEND = 0x000B; // you finished dragging or resizing a window
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
     public const int OBJID_WINDOW = 0;

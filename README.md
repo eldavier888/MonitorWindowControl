@@ -19,8 +19,9 @@ idea that an app "belongs" on a particular screen.
 
 Monitor Window Control is a working prototype of how this could work in Windows itself:
 
-- **A home monitor per app.** New windows open on the app's home, or on the main monitor while that one isn't connected
-  (that's temporary: it isn't learned as the new home).
+- **A home monitor per app.** New windows open on the app's home, or on the main monitor (or another one you choose)
+  while that one isn't connected or is switched off. That's temporary: it isn't learned as the new home, and the
+  windows go back when the monitor does.
 - **Learned, not configured.** The monitor where you actively use an app (the focused window, for a few seconds) becomes its home.
   Background windows never count, so a window forgotten on the TV can't teach it the wrong thing.
 - **Easy overrides.** You can pin an app to a monitor, or mark it "never move".
@@ -66,7 +67,7 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
 ## Using it
 
 - **Tray icon** (tray mode): double-click to open the window. Right-click for *Open*, *Move new windows*
-  (pause/resume), *Exit*. Closing the window just puts it back in the tray (**Exit** in the window closes it completely).
+  (pause/resume), *Monitors* (treat a monitor as switched off, see below), *Exit*. Closing the window just puts it back in the tray (**Exit** in the window closes it completely).
   In the other modes there's no tray icon: start `MonitorWindowControl.exe` again to change settings, and closing
   its window closes it completely.
 - **Move new windows**: moves new windows to their app's monitor. Turn it off to pause everything (learning too).
@@ -76,11 +77,24 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
   after monitors change (a TV switched on, waking from sleep, a game changing resolution), because then you use
   apps where they *have* to be, not where you want them. Changing the refresh rate or turning HDR on or off doesn't
   count as monitors changing. Nothing is learned while monitors are duplicated (Windows key + P → *Duplicate*) or
-  during a Remote Desktop session either; the General page says so at the top. Installers and uninstallers aren't remembered.
+  during a Remote Desktop session either; the General page says so at the top. Nothing is learned on a monitor you
+  treat as switched off, and apps aren't learned on a monitor kept for apps you choose. Installers and uninstallers aren't remembered.
 - **While connected with Remote Desktop**: when you use this PC from another one, the other PC's monitors replace
   yours, so by default Monitor Window Control pauses until you're back (**Pause**). Choose **Keep moving windows**
   if you want windows placed anyway; learning still pauses.
 - **Apps it hasn't learned yet**: open them on the main monitor, or leave them where Windows puts them.
+- **When an app's monitor is off**: where apps open while their own monitor is disconnected or switched off: the main
+  monitor (default), another monitor you choose, or where Windows puts them. Each app can have its own choice too (Apps page).
+- **When a monitor comes back** (TV switched on again, waking from sleep, a dock reconnected): windows that opened on
+  another monitor while it was off, and windows Windows moved off it when it went away, go back to it (**Move its windows
+  back**, the default), about 3 seconds after things settle. Windows you've moved since, and windows Windows already put
+  back, stay where they are; so do minimized, fullscreen and administrator windows. Choose **Leave them where they are**
+  to turn this off.
+- **Put windows back after sleep** (on by default): Windows often squeezes and stacks windows while monitors sleep.
+  Just before the PC sleeps, Monitor Window Control notes where each window is (in memory only, nothing is saved).
+  After you sign in again and the monitors are back (it waits up to a minute for all of them), windows that moved go
+  back where they were. Windows you move after waking up are left alone. Windows of a monitor that isn't back yet go
+  back when it is.
 - **Your monitors**: shows each monitor by its model name, its size and how it's connected (HDMI, DisplayPort,
   USB-C, wireless…); "(main)" is the one set as main display in Windows. Monitors are recognised by the monitor
   itself (its serial number and the port it's plugged into), not by Windows' display number, so homes, names and
@@ -96,12 +110,33 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
     everywhere in the app, and your numbers set the order. (Windows keeps its own display numbers; apps can't change those.)
   - **Make main**: makes that monitor the main display in Windows itself, the same as Settings → Display →
     "Make this my main display". The taskbar clock and Start menu move there, and apps it hasn't learned yet open there.
+  - **Treat as switched off** (*No* / *Until I turn it back on* / *For 1 hour*): for a TV that stays connected when you
+    turn it off with its remote, so Windows still puts windows on it while it's dark. While it's on, new windows open where
+    they would if that monitor were disconnected (see *When an app's monitor is off*), even windows that would otherwise
+    be left where Windows puts them, and nothing is learned there. When you set it back to *No* (or the hour is over),
+    the windows that had to go elsewhere move back. In tray mode it's two clicks away: tray icon → *Monitors* → the
+    monitor (*For 1 hour* is just below). The General page and the tray icon's tooltip say which monitor is off.
+    Windows already on it aren't moved.
+  - **What can open here** (*Any app* / *Only apps I choose*): keep a monitor, such as the TV, for a few apps. With
+    *Only apps I choose*, only apps you set to open there on the Apps page (or ticked for *Where I used it last*, or
+    chose for *If it's off, open on*) open there. Other apps are never learned there, and a new window of another app
+    that Windows opens there moves to that app's own monitor or the main monitor. Apps set to *Never move* are left alone.
+- **Keep my main monitor** (Monitors page, off by default): after a reconnect, a driver update or a TV waking up,
+  Windows sometimes makes another monitor the main one. With this on, Monitor Window Control changes it back to the
+  monitor that was main when you turned it on (press **Make main** on another monitor to keep that one instead). It waits
+  until monitors have settled, never acts while only one monitor is connected, while monitors are duplicated or during
+  Remote Desktop, and changes it back at most twice in 5 minutes: if Windows keeps changing it, it stops and says so.
 - **Apps and where they open**: lists your saved apps **and every app that's open right now** ("open now").
   Select one, choose where it opens and press **Save**:
   - **a monitor**: it always opens there, and its open windows move there right away;
   - **Where I used it last…**: tick the monitors it may use (for example the side monitor and the TV). It opens on
-    whichever of those you used it on most recently;
+    whichever of those you used it on most recently. If that one is off, it opens on the next one in the list: use the
+    up and down arrows next to each monitor to set the order;
   - **Never move this app**: leave it alone.
+
+  **If it's off, open on**: where this app opens while its monitor is disconnected or switched off: the same as other
+  apps (the General page's choice, the default), the main monitor, another monitor (for example the side monitor for a
+  streaming app while the TV is off), or where Windows puts it.
 
   Your choice is "Set by you": learning never overrides it. **Forget** (or the Delete key) removes one app and
   **Forget all…** removes everything; both ask first. With many apps, type in **Search apps** to filter the list.
@@ -113,10 +148,13 @@ right after opening):
 
 | The app is... | Monitor Window Control... |
 |---|---|
-| learned or set by you | moves it to that monitor. If that monitor is off/disconnected, to the main monitor for now (never to a temporary monitor) |
-| set to "Where I used it last" | moves it to the monitor (of the ones you ticked) where you last used it. If that one is off, to another one you ticked; if you never used it yet, leaves it |
+| learned or set by you | moves it to that monitor. If that monitor is disconnected, switched off, or kept for other apps: to the app's *If it's off, open on* choice, else to the General page's choice, else the main monitor (never to a temporary monitor), and back to its own monitor when that one can be used again |
+| set to "Where I used it last" | moves it to the monitor (of the ones you ticked) where you last used it. If that one is off, to the next one you ticked, in your order (then as above); if you never used it yet, leaves it |
 | set to "Never move" | leaves it alone |
 | not known yet | moves it to the main monitor (or leaves it, per your setting) |
+
+A window that would be left where Windows puts it is still moved off a monitor that's switched off or kept for other
+apps (except apps set to "Never move").
 
 Each window is handled once. If you move it somewhere else afterwards, Monitor Window Control won't move it back.
 (It only corrects an app that jumps straight back to where it opened, within the first second.)

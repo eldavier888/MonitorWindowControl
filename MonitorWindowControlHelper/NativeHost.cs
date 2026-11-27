@@ -13,8 +13,10 @@ internal sealed class NativeHost : IEngineHost, IDisposable
 {
     private const uint WM_DESTROY = 0x0002, WM_CLOSE = 0x0010, WM_QUERYENDSESSION = 0x0011, WM_ENDSESSION = 0x0016,
                        WM_TIMER = 0x0113, WM_DISPLAYCHANGE = 0x007E, WM_SETTINGCHANGE = 0x001A, WM_APP_POST = 0x8001,
-                       WM_WTSSESSION_CHANGE = 0x02B1;
-    private const int WTS_CONSOLE_CONNECT = 1, WTS_CONSOLE_DISCONNECT = 2, WTS_REMOTE_CONNECT = 3, WTS_REMOTE_DISCONNECT = 4;
+                       WM_WTSSESSION_CHANGE = 0x02B1, WM_POWERBROADCAST = 0x0218;
+    private const int WTS_CONSOLE_CONNECT = 1, WTS_CONSOLE_DISCONNECT = 2, WTS_REMOTE_CONNECT = 3, WTS_REMOTE_DISCONNECT = 4,
+                      WTS_SESSION_LOCK = 7, WTS_SESSION_UNLOCK = 8;
+    private const int PBT_APMSUSPEND = 0x4, PBT_APMRESUMESUSPEND = 0x7, PBT_APMRESUMEAUTOMATIC = 0x12;
     private const uint NOTIFY_FOR_THIS_SESSION = 0;
 
     private delegate IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
@@ -63,6 +65,12 @@ internal sealed class NativeHost : IEngineHost, IDisposable
 
     /// <summary>Called when Remote Desktop connects or disconnects, or this PC's own screen is reconnected.</summary>
     public Action? SessionChanged { get; set; }
+
+    /// <summary>Called when the session is locked (true) or unlocked (false).</summary>
+    public Action<bool>? LockChanged { get; set; }
+
+    /// <summary>Called just before the PC goes to sleep (true) and when it wakes up (false).</summary>
+    public Action<bool>? PowerChanged { get; set; }
 
     private readonly bool _sessionNotifications;
 
@@ -134,6 +142,15 @@ internal sealed class NativeHost : IEngineHost, IDisposable
                 case WM_WTSSESSION_CHANGE when (int)wParam is WTS_CONSOLE_CONNECT or WTS_CONSOLE_DISCONNECT
                                                          or WTS_REMOTE_CONNECT or WTS_REMOTE_DISCONNECT:
                     SessionChanged?.Invoke();
+                    break;
+                case WM_WTSSESSION_CHANGE when (int)wParam is WTS_SESSION_LOCK or WTS_SESSION_UNLOCK:
+                    LockChanged?.Invoke((int)wParam == WTS_SESSION_LOCK);
+                    break;
+                case WM_POWERBROADCAST when (int)wParam == PBT_APMSUSPEND:
+                    PowerChanged?.Invoke(true);
+                    break;
+                case WM_POWERBROADCAST when (int)wParam is PBT_APMRESUMESUSPEND or PBT_APMRESUMEAUTOMATIC:
+                    PowerChanged?.Invoke(false); // (both can arrive for one wake-up; the engine handles it once)
                     break;
                 case WM_CLOSE:
                     // Someone asked the helper to close (taskkill without /f, an installer…): exit cleanly

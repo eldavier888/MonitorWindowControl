@@ -26,6 +26,15 @@ public sealed class Engine : IDisposable
     private const int HoldAfterChangeMs = 2000;  // new windows wait this long after the last display change…
     private const int MaxHoldMs = 3000;          // …but never longer than this in all
     private const int MaxRequeues = 2;           // a move cut short by a display change is tried again this often
+    private const int SettledMs = 3000;          // monitors count as settled this long after the last display change
+    private const int SnapshotIntervalMs = 5 * 60 * 1000; // how often to note where windows are (in memory only)
+    private const int RestoreWaitSeconds = 60;   // after waking up, wait at most this long for every monitor to come back
+    private const int RectSlack = 2;             // pixels a window may differ by and still count as "where it was left"
+    private const int KeepMainMaxFixes = 2;      // "Keep my main monitor" changes it back at most this often…
+    private static readonly TimeSpan KeepMainPeriod = TimeSpan.FromMinutes(5); // …in this long, then stops
+
+    /// <summary>"Treat as switched off: for 1 hour".</summary>
+    public static readonly TimeSpan OffForAnHour = TimeSpan.FromHours(1);
 
     private readonly IEngineHost _host;
     private readonly int _ownPid = Environment.ProcessId;
@@ -39,6 +48,7 @@ public sealed class Engine : IDisposable
     private readonly IEngineTimer _placeTimer;
     private readonly IEngineTimer _learnTimer;
     private readonly IEngineTimer _displayTimer;
+    private readonly IEngineTimer _snapshotTimer;
     private List<MonitorInfo> _monitors = new();
     private string _monitorSignature = "";
     private string _layoutSignature = "";
@@ -47,6 +57,29 @@ public sealed class Engine : IDisposable
     private int _topologyGeneration;                            // +1 on every display change: moves started before are stale
     private bool _identityBackfillDue;                          // save hardware identity into older saved monitors
     private bool? _wasRemote;
+    private DateTime _nextOffExpiryUtc = DateTime.MaxValue;     // when a "switched off for 1 hour" ends
+
+    // Work done once monitors have settled after a change (see AfterMonitorChanges).
+    private bool _vanishScanDue, _returnCheckDue, _keepMainDue;
+    private DateTime _returnNotBeforeUtc;
+
+    // Where app windows are (in memory only, never saved): taken every few minutes, when the session locks and before sleep.
+    private Dictionary<IntPtr, WindowSnap> _snapshot = new();
+    private IntPtr _lastSnapForeground;
+    private bool _locked;
+
+    // "Put windows back after sleep".
+    private Dictionary<IntPtr, WindowSnap>? _sleepSnapshot;
+    private Dictionary<IntPtr, Native.RECT>? _restoreBaseline; // where windows were once things settled after waking
+    private DateTime _restoreBaselineUtc, _restoreDeadlineUtc;
+    private int _restoreBaselineGeneration;
+    private bool _restoreDue;
+    private IntPtr _moveHook;                               // you finished dragging or resizing a window…
+    private readonly HashSet<IntPtr> _movedSinceWake = new(); // …while windows wait to be put back after sleep
+
+    // "Keep my main monitor".
+    private readonly List<DateTime> _mainFixes = new();
+    private bool _keepMainNoticeShown;
 
     private string? _streakKey, _streakDevice;
     private string? _learnedKey, _learnedDevice; // what the current streak already taught (don't redo it every 2 s)
@@ -58,11 +91,26 @@ public sealed class Engine : IDisposable
     public MonitorInfo? MainMonitor => _monitors.FirstOrDefault(m => m.IsPrimary) ?? _monitors.FirstOrDefault();
 
     /// <summary>
-    /// Where windows go when their monitor isn't connected, and where apps it hasn't learned yet open: the main
-    /// monitor, unless that one is temporary (then the first monitor that isn't).
+    /// Where windows go when their monitor can't be used (and nothing else was chosen), and where apps it hasn't learned
+    /// yet open: the main monitor, unless that one is temporary, switched off or kept for chosen apps (then the first
+    /// monitor that isn't).
     /// </summary>
-    public MonitorInfo? FallbackMonitor =>
-        MainMonitor is { IsTemporary: false } main ? main : _monitors.FirstOrDefault(m => !m.IsTemporary) ?? MainMonitor;
+    public MonitorInfo? FallbackMonitor
+    {
+        get
+        {
+            static bool Open(MonitorInfo m) => !m.IsSwitchedOff && !m.OnlyChosenApps;
+            var main = MainMonitor;
+            if (main != null && Open(main) && !main.IsTemporary) return main;
+            return _monitors.FirstOrDefault(m => Open(m) && !m.IsTemporary) ?? _monitors.FirstOrDefault(Open) ?? main;
+        }
+    }
+
+    /// <summary>Raised for something worth a tray notice (title, text), such as the main monitor being changed back.</summary>
+    public event Action<string, string>? Notice;
+
+    /// <summary>True when "Keep my main monitor" stopped because Windows kept making another monitor main.</summary>
+    public bool KeepMainStopped => Settings.KeepMainMonitor != null && Settings.KeepMainStopped;
 
     /// <summary>True while this PC is used through Remote Desktop (its own monitors are replaced by the remote ones).</summary>
     public static bool IsRemoteSession => Native.GetSystemMetrics(Native.SM_REMOTESESSION) != 0;
@@ -90,7 +138,32 @@ public sealed class Engine : IDisposable
     /// <summary>Raised when an app window appears or one seen this session closes (so a list of open apps can update).</summary>
     public event Action? AppWindowsChanged;
     private readonly HashSet<IntPtr> _appWindows = new();
-    private readonly HashSet<IntPtr> _fallbackPlaced = new(); // put on main only because its monitor isn't connected
+    private readonly Dictionary<IntPtr, Displaced> _displaced = new(); // windows that go back when their monitor is back
+
+    /// <summary>
+    /// A window that isn't on its monitor only because that monitor couldn't be used: a new window placed elsewhere
+    /// (its app's monitor was disconnected, switched off or kept for chosen apps), or a window Windows moved off a
+    /// monitor that went away. When the monitor is back, it moves back, unless you've moved it since.
+    /// </summary>
+    private sealed class Displaced
+    {
+        public string? AppKey;           // goes back to this app's monitor…
+        public MonitorRef? Home;         // …or to this monitor (the one it was on when that went away)
+        public WindowSnap? Saved;        // where it was on that monitor, to put it back exactly
+        public string DroppedDevice = ""; // where it was left
+        public Native.RECT DroppedRect;
+        public long ProcessStart;        // a reused window handle belongs to another program
+    }
+
+    /// <summary>Where one app window was (kept in memory only).</summary>
+    private sealed class WindowSnap
+    {
+        public MonitorRef Monitor = new();
+        public Native.RECT MonitorBounds;
+        public Native.RECT Rect;
+        public bool Maximized;
+        public long ProcessStart;
+    }
 
     private sealed class Pending
     {
@@ -122,7 +195,11 @@ public sealed class Engine : IDisposable
             if (_identityBackfillDue) BackfillIdentity();
         });
         _displayTimer = display;
+        _snapshotTimer = host.CreateTimer(SnapshotIntervalMs, TakeSnapshot);
     }
+
+    /// <summary>The engine that places windows for this session (not a launch shortcut's, not a settings window's).</summary>
+    private bool IsMainEngine => _activeMutex != null && IsActive;
 
     /// <summary>
     /// Loads settings and monitors (and, in the settings app, imports the old .ini on first run).
@@ -183,15 +260,27 @@ public sealed class Engine : IDisposable
         }
         _learning = learn;
         _learnTimer.Start(); // also keeps settings fresh when another process changes them
+        if (IsMainEngine)
+        {
+            TakeSnapshot();
+            _snapshotTimer.Start();
+            _keepMainDue = true; // Windows may have made another monitor main before this started
+            // Windows you drag after waking up are left where you put them (only fires when you drag one).
+            _moveHook = Native.SetWinEventHook(Native.EVENT_SYSTEM_MOVESIZEEND, Native.EVENT_SYSTEM_MOVESIZEEND, IntPtr.Zero,
+                _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+        }
         return true;
     }
 
     /// <summary>Stops watching windows (settings stay loaded; the window/UI keeps working).</summary>
     public void Deactivate()
     {
-        _placeTimer.Stop(); _learnTimer.Stop();
+        _placeTimer.Stop(); _learnTimer.Stop(); _snapshotTimer.Stop();
         if (_hook != IntPtr.Zero) { Native.UnhookWinEvent(_hook); _hook = IntPtr.Zero; }
-        _pending.Clear(); _handled.Clear(); _appWindows.Clear(); _fallbackPlaced.Clear(); ResetStreak();
+        if (_moveHook != IntPtr.Zero) { Native.UnhookWinEvent(_moveHook); _moveHook = IntPtr.Zero; }
+        _pending.Clear(); _handled.Clear(); _appWindows.Clear(); _displaced.Clear(); ResetStreak();
+        _snapshot.Clear(); _sleepSnapshot = null; _restoreBaseline = null; _restoreDue = false; _movedSinceWake.Clear();
+        _vanishScanDue = _returnCheckDue = _keepMainDue = false;
         ReleaseActiveMutex();
     }
 
@@ -213,9 +302,13 @@ public sealed class Engine : IDisposable
     /// </summary>
     public bool ReloadIfChanged()
     {
-        if (!_started || !SettingsStore.ChangedOnDisk()) return false;
+        if (!_started) return false;
+        if (DateTime.UtcNow >= _nextOffExpiryUtc) OffTimeOver();
+        if (!SettingsStore.ChangedOnDisk()) return false;
         var fresh = SettingsStore.TryReload();
         if (fresh == null) return false;
+        // "Keep my main monitor" turned off, or started again in another process: count its changes from zero.
+        if (fresh.KeepMainMonitor == null || (Settings.KeepMainStopped && !fresh.KeepMainStopped)) _mainFixes.Clear();
         Settings = fresh;
         _monitorSignature = ""; // names/numbers may have changed
         RefreshMonitors();
@@ -264,8 +357,12 @@ public sealed class Engine : IDisposable
 
     public void RefreshMonitors()
     {
+        var wasClosed = _monitors.Where(m => m.IsSwitchedOff || m.OnlyChosenApps)
+                                 .Select(m => m.DeviceName).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var list = MonitorService.Enumerate();
         _monitors = list;
+        var now = DateTime.UtcNow;
+        var nextExpiry = DateTime.MaxValue;
         foreach (var m in list)
         {
             foreach (var t in m.Targets)
@@ -276,7 +373,17 @@ public sealed class Engine : IDisposable
             }
             // A duplicated display is temporary only if every monitor showing it is (casting a copy of the main monitor isn't).
             m.IsTemporary = m.Targets.All(t => IsTemporaryTarget(t));
+            // The same goes for "switched off" and "only apps I choose": every monitor showing it must be.
+            var options = m.Targets.Select(OptionsOf).ToList();
+            m.IsSwitchedOff = options.All(o => o != null && o.IsOffAt(now));
+            m.SwitchedOffUntilUtc = !m.IsSwitchedOff || options.Any(o => o!.OffUntilUtc == null) ? null : options.Max(o => o!.OffUntilUtc);
+            if (m.SwitchedOffUntilUtc is DateTime until && until < nextExpiry) nextExpiry = until;
+            m.OnlyChosenApps = options.All(o => o?.OnlyChosenApps == true);
+            m.HasOtherMonitors = list.Count > 1;
         }
+        _nextOffExpiryUtc = nextExpiry;
+        // A monitor you switched back on (or opened to every app again): windows that had to go elsewhere can go back.
+        if (list.Any(m => wasClosed.Contains(m.DeviceName) && !m.IsSwitchedOff && !m.OnlyChosenApps)) ScheduleReturnCheck();
         // Your numbers decide the order (numbered first, 1, 2, 3…); otherwise main first, then left to right.
         list = list.OrderBy(m => m.Number ?? int.MaxValue).ThenByDescending(m => m.IsPrimary).ThenBy(m => m.Bounds.Left).ToList();
         _monitors = list;
@@ -287,11 +394,15 @@ public sealed class Engine : IDisposable
         {
             if (_layoutSignature.Length > 0) // (not the first read at startup)
             {
-                var now = DateTime.UtcNow;
+                now = DateTime.UtcNow;
                 _lastMonitorChangeUtc = now;
                 _lastDisplayEventUtc = now;
                 _topologyGeneration++;
                 _identityBackfillDue = true;
+                // Once things settle: note the windows of a monitor that went away, move windows back to one that
+                // came back, and check the main monitor.
+                _vanishScanDue = _keepMainDue = true;
+                ScheduleReturnCheck();
             }
             _layoutSignature = layout;
             if (list.FirstOrDefault(m => m.IsDuplicated) is MonitorInfo dup)
@@ -299,12 +410,13 @@ public sealed class Engine : IDisposable
         }
 
         // Only refreshing names and notes (and Changed) for a change you can see: names, numbers, temporary, main.
-        string sig = string.Join("|", list.Select(m => $"{m.DeviceName}={m.Name}{(m.IsPrimary ? "*" : "")}{(m.IsTemporary ? "~" : "")}@{m.Bounds}/{m.Work}"));
+        string sig = string.Join("|", list.Select(m => $"{m.DeviceName}={m.Name}{(m.IsPrimary ? "*" : "")}{(m.IsTemporary ? "~" : "")}" +
+                                                       $"{(m.IsSwitchedOff ? "!" + m.SwitchedOffUntilUtc : "")}{(m.OnlyChosenApps ? "#" : "")}@{m.Bounds}/{m.Work}"));
         if (sig == _monitorSignature) return;
         _monitorSignature = sig;
         Log.Write("Monitors: " + string.Join(", ", list.Select(m =>
             $"{m.Label} [{m.DeviceName}{string.Concat(m.Targets.Select(t => $" {t.Connection} {t.Model} {t.Serial}".TrimEnd()))}" +
-            $"{(m.IsTemporary ? ", temporary" : "")}]")));
+            $"{(m.IsTemporary ? ", temporary" : "")}{(m.IsSwitchedOff ? ", switched off" : "")}{(m.OnlyChosenApps ? ", only chosen apps" : "")}]")));
         if (_started) Changed?.Invoke();
     }
 
@@ -331,8 +443,49 @@ public sealed class Engine : IDisposable
     }
 
     /// <summary>Is this monitor temporary: your choice for it, else wireless and virtual monitors are.</summary>
-    private bool IsTemporaryTarget(MonitorTarget t) =>
-        Settings.MonitorOptions.FirstOrDefault(o => MatchesTarget(o.Monitor, t))?.Temporary ?? t.IsTemporaryByDefault;
+    private bool IsTemporaryTarget(MonitorTarget t) => OptionsOf(t)?.Temporary ?? t.IsTemporaryByDefault;
+
+    /// <summary>Your saved choices for one physical monitor, or null if you made none.</summary>
+    private MonitorOptions? OptionsOf(MonitorTarget t) => Settings.MonitorOptions.FirstOrDefault(o => MatchesTarget(o.Monitor, t));
+
+    /// <summary>Your saved choices for a monitor (its first physical monitor), added if there are none yet.</summary>
+    private MonitorOptions OptionsFor(MonitorInfo m)
+    {
+        var t = m.Targets[0];
+        var o = OptionsOf(t);
+        if (o == null) { o = new MonitorOptions { Monitor = RefTo(m, t) }; Settings.MonitorOptions.Add(o); }
+        return o;
+    }
+
+    /// <summary>The connected monitor a saved reference points to, or null if it isn't connected.</summary>
+    public MonitorInfo? FindMonitor(MonitorRef? r) => r == null ? null : MonitorMatcher.Find(_monitors, r.Name, r.Device, r.Hardware);
+
+    /// <summary>A short key for a saved monitor reference (to tell whether a choice changed).</summary>
+    private static string RefKey(MonitorRef r) => $"{r.Device}|{r.Name}|{r.Hardware?.DevicePath}|{r.Hardware?.Model}|{r.Hardware?.Serial}";
+
+    /// <summary>
+    /// Can the app's windows open on this monitor right now? Not while it's switched off, and on a monitor kept for
+    /// chosen apps only if you chose it for this app.
+    /// </summary>
+    private bool CanUse(AppRule? rule, MonitorInfo m) => !m.IsSwitchedOff && (!m.OnlyChosenApps || ChoseMonitor(rule, m));
+
+    /// <summary>
+    /// Did you choose this monitor for the app yourself: as its monitor ("Set by you"), ticked for "Where I used it
+    /// last", or as its "If it's off, open on"? Learned monitors don't count.
+    /// </summary>
+    private bool ChoseMonitor(AppRule? rule, MonitorInfo m)
+    {
+        if (rule == null || rule.NeverMove) return false;
+        if (rule.Fallback == FallbackModes.Monitor && rule.FallbackMonitor != null && Matches(rule.FallbackMonitor, m)) return true;
+        if (!rule.Pinned) return false;
+        return rule.FollowLastUsed
+            ? rule.AllowedMonitors.Any(a => Matches(a, m))
+            : string.Equals(Resolve(rule)?.DeviceName, m.DeviceName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Why a monitor can't be used for an app right now, for the log.</summary>
+    private string WhyNotUsable(AppRule? rule, MonitorInfo m) =>
+        m.IsSwitchedOff ? "is switched off" : !CanUse(rule, m) ? "only opens apps you choose" : "can't be used";
 
     private MonitorInfo? MonitorByDevice(string? device) =>
         device == null ? null : _monitors.FirstOrDefault(m => string.Equals(m.DeviceName, device, StringComparison.OrdinalIgnoreCase));
@@ -347,10 +500,12 @@ public sealed class Engine : IDisposable
         ReferenceEquals(MonitorMatcher.FindTarget(_monitors, r.Name, r.Device, r.Hardware)?.Target, t);
 
     /// <summary>A saved reference to a connected monitor (device, model name and hardware identity).</summary>
-    private static MonitorRef RefTo(MonitorInfo m) => new() { Device = m.DeviceName, Name = m.FriendlyName, Hardware = m.Hardware };
+    private static MonitorRef RefTo(MonitorInfo m) =>
+        new() { Device = m.DeviceName, Name = m.FriendlyName, Hardware = MonitorHardware.Clean(m.Hardware) };
 
     /// <summary>A saved reference to one physical monitor (one of a duplicated display's monitors).</summary>
-    private static MonitorRef RefTo(MonitorInfo m, MonitorTarget t) => new() { Device = m.DeviceName, Name = t.FriendlyName, Hardware = t.Hardware };
+    private static MonitorRef RefTo(MonitorInfo m, MonitorTarget t) =>
+        new() { Device = m.DeviceName, Name = t.FriendlyName, Hardware = MonitorHardware.Clean(t.Hardware) };
 
     /// <summary>Points a rule at a monitor: its device, model name and hardware identity.</summary>
     private static void SetMonitor(AppRule rule, MonitorInfo? m)
@@ -381,8 +536,10 @@ public sealed class Engine : IDisposable
             changed = true;
         }
         foreach (var r in Settings.Apps.SelectMany(a => a.AllowedMonitors)
+                     .Concat(Settings.Apps.Select(a => a.FallbackMonitor).OfType<MonitorRef>())
                      .Concat(Settings.MonitorNicknames.Select(n => n.Monitor))
-                     .Concat(Settings.MonitorOptions.Select(o => o.Monitor)))
+                     .Concat(Settings.MonitorOptions.Select(o => o.Monitor))
+                     .Concat(new[] { Settings.FallbackMonitor, Settings.KeepMainMonitor }.OfType<MonitorRef>()))
         {
             var hw = IdentityToSave(r.Name, r.Device, r.Hardware);
             if (hw == null) continue;
@@ -424,15 +581,49 @@ public sealed class Engine : IDisposable
     /// <summary>The connected monitors a "Where I used it last" app may open on.</summary>
     public List<MonitorInfo> AllowedConnected(AppRule rule) => _monitors.Where(m => IsAllowed(rule, m)).ToList();
 
-    /// <summary>Where a saved app's new windows go right now (null = not connected / no choice possible).</summary>
+    /// <summary>The connected monitors a "Where I used it last" app may open on, in your order.</summary>
+    public List<MonitorInfo> AllowedInOrder(AppRule rule) =>
+        rule.AllowedMonitors.Select(FindMonitor).OfType<MonitorInfo>().Distinct().ToList();
+
+    /// <summary>
+    /// Where a saved app's new windows go right now: its monitor, if that's connected and can be used (not switched off,
+    /// not kept for other apps). Null = none of its monitors can be used now, or there's no choice to make.
+    /// </summary>
     public MonitorInfo? ResolveTarget(AppRule rule)
     {
         var m = Resolve(rule);
-        if (!rule.FollowLastUsed) return m;
-        if (m != null && IsAllowed(rule, m)) return m;           // the monitor you used it on last
+        if (!rule.FollowLastUsed) return m != null && CanUse(rule, m) ? m : null;
+        if (m != null && IsAllowed(rule, m) && CanUse(rule, m)) return m; // the monitor you used it on last
         if (rule.AllowedMonitors.Count == 0) return null;
-        var others = AllowedConnected(rule);                     // else another of its monitors, a permanent one first
+        // Else the next of its monitors in your order, a permanent one first.
+        var others = AllowedInOrder(rule).Where(o => CanUse(rule, o)).ToList();
         return others.FirstOrDefault(o => !o.IsTemporary) ?? others.FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Where an app goes while its own monitor can't be used (null = leave it): its "If it's off, open on", then the
+    /// choice for all apps, then the main monitor. <paramref name="where"/> says which, for the log.
+    /// </summary>
+    private MonitorInfo? FallbackFor(AppRule rule, out string where)
+    {
+        if (rule.Fallback == FallbackModes.Leave) { where = "left where Windows put it (your choice for this app)"; return null; }
+        if (rule.Fallback == FallbackModes.Monitor && FindMonitor(rule.FallbackMonitor) is { } own && CanUse(rule, own))
+        {
+            where = $"{own.Name} (your choice for this app)";
+            return own;
+        }
+        if (rule.Fallback != FallbackModes.Main)
+        {
+            if (Settings.Fallback == FallbackModes.Leave) { where = "left where Windows put it"; return null; }
+            if (Settings.Fallback == FallbackModes.Monitor && FindMonitor(Settings.FallbackMonitor) is { } all && CanUse(rule, all))
+            {
+                where = all.Name;
+                return all;
+            }
+        }
+        var main = FallbackMonitor;
+        where = main == null ? "left where it is" : main.IsPrimary ? "main monitor" : main.Name;
+        return main;
     }
 
     private MonitorInfo? MonitorOfWindow(IntPtr hwnd)
@@ -449,11 +640,20 @@ public sealed class Engine : IDisposable
     {
         if (hwnd == IntPtr.Zero || idObject != Native.OBJID_WINDOW || idChild != Native.CHILDID_SELF) return;
 
+        if (eventType == Native.EVENT_SYSTEM_MOVESIZEEND)
+        {
+            if (_restoreDue) _movedSinceWake.Add(hwnd); // you moved it after waking up: don't put it back
+            return;
+        }
+
         if (eventType == Native.EVENT_OBJECT_DESTROY)
         {
             _handled.Remove(hwnd);
             _pending.Remove(hwnd);
-            _fallbackPlaced.Remove(hwnd);
+            _displaced.Remove(hwnd);
+            _snapshot.Remove(hwnd);
+            _sleepSnapshot?.Remove(hwnd);
+            _movedSinceWake.Remove(hwnd);
             if (_appWindows.Remove(hwnd)) AppWindowsChanged?.Invoke();
             return;
         }
@@ -474,7 +674,7 @@ public sealed class Engine : IDisposable
         {
             try
             {
-                if (p.Verify) Verify(hwnd, p);
+                if (p.Verify) { Verify(hwnd, p); RefreshDropped(hwnd); }
                 else TryPlace(hwnd, p, now);
             }
             catch (Exception ex)
@@ -581,29 +781,68 @@ public sealed class Engine : IDisposable
         return fresh;
     }
 
-    private void PlaceNewWindow(IntPtr hwnd, AppIdentity app, AppRule? rule, string title, Pending p)
+    /// <summary>
+    /// Where a new window goes, and why (for the log). Null = leave it. "Displaced" means it goes somewhere else only
+    /// because its app's own monitor can't be used right now (disconnected, switched off, or kept for chosen apps), so it
+    /// moves back once that monitor can be used again. <c>ReturnTo</c> is set instead for a window with no monitor of its
+    /// own that Windows opened on a switched-off monitor: it goes back there when that monitor is switched on again.
+    /// </summary>
+    private (MonitorInfo? Target, string Reason, bool Displaced, MonitorRef? ReturnTo) ChooseTarget(AppRule? rule, MonitorInfo? current)
     {
         MonitorInfo? target;
         string reason;
-        if (rule != null && rule.NeverMove) return;
+        bool displaced = false;
+        MonitorRef? returnTo = null;
         if (rule != null)
         {
             target = ResolveTarget(rule);
             reason = rule.FollowLastUsed ? "where you used it last" : rule.Pinned ? "set by you" : "learned";
-            if (target == null && rule.FollowLastUsed && rule.MonitorDevice == null) return; // never used yet: leave it
-            if (target == null)
+            var home = Resolve(rule);
+            if (target != null)
             {
-                target = FallbackMonitor;
-                reason += $"; its monitor ({rule.MonitorName ?? rule.MonitorDevice}) isn't connected, so " +
-                          (target?.IsPrimary == true ? "main monitor" : target?.Name);
+                // "Where I used it last" on another of its monitors, because the last one is off: that one is still home.
+                displaced = rule.FollowLastUsed && home != null && IsAllowed(rule, home) && !CanUse(rule, home);
+                if (displaced) reason += $"; {home!.Name} {WhyNotUsable(rule, home)}, so the next of its monitors";
             }
+            else if (!(rule.FollowLastUsed && rule.MonitorDevice == null)) // (never used yet: leave it)
+            {
+                string why = home == null
+                    ? $"its monitor ({rule.MonitorName ?? rule.MonitorDevice}) isn't connected"
+                    : $"its monitor ({home.Name}) {WhyNotUsable(rule, home)}";
+                target = FallbackFor(rule, out string where);
+                reason += $"; {why}, so {where}";
+                displaced = target != null;
+            }
+        }
+        else if (Settings.MoveUnknownToMain)
+        {
+            target = FallbackMonitor;
+            reason = target?.IsPrimary == true ? "new app → main monitor" : $"new app → {target?.Name} (the main monitor can't be used now)";
         }
         else
         {
-            if (!Settings.MoveUnknownToMain) return;
-            target = FallbackMonitor;
-            reason = target?.IsPrimary == true ? "new app → main monitor" : $"new app → {target?.Name} (the main monitor is temporary)";
+            target = null;
+            reason = "new app";
         }
+
+        // A window Windows opened on a monitor that's switched off (or kept for other apps) never stays there, even when
+        // it would otherwise be left where it is.
+        if (target == null && current != null && !CanUse(rule, current) && FallbackMonitor is { } stand && CanUse(rule, stand)
+            && stand.DeviceName != current.DeviceName)
+        {
+            target = stand;
+            reason += $"; it opened on {current.Name}, which {WhyNotUsable(rule, current)}";
+            // It counts as displaced too: back to its app's monitor, or (no monitor of its own) to the one it opened on.
+            if (rule != null && Resolve(rule) is { } home && !CanUse(rule, home)) displaced = true;
+            else if (current.IsSwitchedOff) returnTo = RefTo(current);
+        }
+        return (target, reason, displaced, returnTo);
+    }
+
+    private void PlaceNewWindow(IntPtr hwnd, AppIdentity app, AppRule? rule, string title, Pending p)
+    {
+        if (rule != null && rule.NeverMove) return;
+        var (target, reason, displaced, returnTo) = ChooseTarget(rule, MonitorOfWindow(hwnd));
         if (target == null) return;
         if (p.WasHeld) reason += "; held during a display change";
 
@@ -621,7 +860,12 @@ public sealed class Engine : IDisposable
         if (target == null) return;
 
         var current = MonitorOfWindow(hwnd);
-        if (current != null && current.DeviceName == target.DeviceName) return; // already home
+        if (current != null && current.DeviceName == target.DeviceName)
+        {
+            // Already there. If that's only a stand-in for its own monitor, it still goes back when that one can be used.
+            RememberDisplaced(hwnd, rule, displaced, returnTo);
+            return;
+        }
 
         if (Native.IsIconic(hwnd)) { Log.Write($"Skipped {app.Key} \"{title}\": minimized."); return; }
         if (WindowMover.IsFullscreen(hwnd, current)) { Log.Write($"Skipped {app.Key} \"{title}\": fullscreen."); return; }
@@ -642,7 +886,7 @@ public sealed class Engine : IDisposable
         }
         if (result == WindowMover.Result.Moved)
         {
-            if (reason.Contains("isn't connected")) _fallbackPlaced.Add(hwnd);
+            RememberDisplaced(hwnd, rule, displaced, returnTo);
             Note($"Moved {app.DisplayName} from {from} to {target.Name} ({reason}).", $"{app.Key} \"{title}\"");
             // Check once more shortly: some apps restore their saved position after showing.
             Native.GetWindowRect(hwnd, out var placed);
@@ -696,11 +940,17 @@ public sealed class Engine : IDisposable
         if (++_tickCount % 30 == 0) // safety net, ~every minute
         {
             _handled.RemoveWhere(h => !Native.IsWindow(h));
-            _fallbackPlaced.RemoveWhere(h => !Native.IsWindow(h));
+            foreach (var gone in _displaced.Keys.Where(h => !Native.IsWindow(h)).ToList()) _displaced.Remove(gone);
         }
         ReloadIfChanged(); // pick up changes made in the settings window / by the helper
         if (_identityBackfillDue && DateTime.UtcNow - _lastDisplayEventUtc > TimeSpan.FromMilliseconds(HoldAfterChangeMs))
             BackfillIdentity();
+        if (IsMainEngine)
+        {
+            var now = DateTime.UtcNow;
+            TrackForeground(now);
+            AfterMonitorChanges(now);
+        }
         if (!_learning) return;
 
         // Don't learn while monitors are changing (sleep, display driver reset, a game switching resolution…) or
@@ -723,7 +973,8 @@ public sealed class Engine : IDisposable
 
         var app = WindowInfo.Identify(fg);
         var mon = app == null ? null : MonitorOfWindow(fg);
-        if (app == null || mon == null) { ResetStreak(); return; }
+        // Nothing is learned on a monitor you switched off.
+        if (app == null || mon == null || mon.IsSwitchedOff) { ResetStreak(); return; }
 
         if (app.Key == _streakKey && mon.DeviceName == _streakDevice) _streakCount++;
         else { _streakKey = app.Key; _streakDevice = mon.DeviceName; _streakCount = 1; }
@@ -744,14 +995,15 @@ public sealed class Engine : IDisposable
         ReloadIfChanged();
         var rule = Settings.Find(app.Key);
         if (rule != null) rule = RefreshRuleDetails(rule, app, hwnd);
-        // It's on the main monitor only because its own monitor is off: that's not a choice. (Drag it elsewhere and it is.)
-        if (_fallbackPlaced.Contains(hwnd) && mon.DeviceName == FallbackMonitor?.DeviceName) return;
+        // It's there only because its own monitor couldn't be used: that's not a choice. (Drag it elsewhere and it is.)
+        if (_displaced.TryGetValue(hwnd, out var displaced)
+            && string.Equals(displaced.DroppedDevice, mon.DeviceName, StringComparison.OrdinalIgnoreCase)) return;
         if (rule != null && rule.FollowLastUsed)
         {
             // Remember the last monitor you used it on, if it's one of the monitors you picked for it.
-            // A temporary monitor only counts if you ticked it yourself.
+            // A temporary monitor, or one kept for chosen apps, only counts if you ticked it yourself.
             if (!IsAllowed(rule, mon) || Resolve(rule)?.DeviceName == mon.DeviceName) return;
-            if (mon.IsTemporary && rule.AllowedMonitors.Count == 0) return;
+            if ((mon.IsTemporary || mon.OnlyChosenApps) && rule.AllowedMonitors.Count == 0) return;
             string? was = rule.MonitorName ?? rule.MonitorDevice;
             SetMonitor(rule, mon); rule.UpdatedUtc = DateTime.UtcNow;
             Save();
@@ -763,6 +1015,7 @@ public sealed class Engine : IDisposable
         if (rule != null && (rule.Pinned || rule.NeverMove)) return;
         if (rule == null && WindowInfo.IsOneOffApp(app.Key)) return; // setup / uninstall / update programs
         if (mon.IsTemporary) return; // wireless, virtual…: never an app's home unless you set it
+        if (mon.OnlyChosenApps) return; // "only apps I choose": learning never makes it a home
         if (rule != null && Resolve(rule)?.DeviceName == mon.DeviceName)
         {
             if (rule.MonitorDevice != mon.DeviceName || rule.MonitorName != mon.FriendlyName
@@ -784,6 +1037,360 @@ public sealed class Engine : IDisposable
         Note(old == null
             ? $"Learned: {app.DisplayName} opens on {mon.Name}."
             : $"Learned: {app.DisplayName} now opens on {mon.Name} (was {old}).", $"[{app.Key} {mon.DeviceName}]");
+        Changed?.Invoke();
+    }
+
+    // ------------------------------------------------------------------ monitors coming back, sleep, main monitor
+
+    /// <summary>The host calls this just before the PC goes to sleep or hibernates: remember where windows are.</summary>
+    public void OnSuspending()
+    {
+        if (_disposed || !IsMainEngine) return;
+        if (!_locked) TakeSnapshot(); // when locked, the snapshot from locking is the right one (monitors may be off since)
+        _sleepSnapshot = _snapshot.ToDictionary(kv => kv.Key, kv => kv.Value);
+        _restoreDue = false;
+        _restoreBaseline = null;
+        Log.Write($"Going to sleep: noted where {_sleepSnapshot.Count} windows are.");
+    }
+
+    /// <summary>The host calls this when the PC wakes up. Windows are put back once monitors have settled and you're signed in.</summary>
+    public void OnResumed()
+    {
+        if (_disposed || !IsMainEngine || _sleepSnapshot == null || _restoreDue) return;
+        if (!Settings.RestoreAfterSleep || _sleepSnapshot.Count == 0) { _sleepSnapshot = null; return; }
+        _restoreDue = true;
+        _restoreBaseline = null;
+        _movedSinceWake.Clear();
+        _restoreDeadlineUtc = DateTime.UtcNow.AddSeconds(RestoreWaitSeconds);
+    }
+
+    /// <summary>The host calls this when the session is locked or unlocked.</summary>
+    public void OnSessionLock(bool locked)
+    {
+        if (_disposed) return;
+        if (locked)
+        {
+            TakeSnapshot(); // before monitors go dark: some of them disconnect when they sleep
+            _locked = true;
+            return;
+        }
+        _locked = false;
+        if (_restoreDue) { _restoreBaseline = null; _restoreDeadlineUtc = DateTime.UtcNow.AddSeconds(RestoreWaitSeconds); }
+    }
+
+    /// <summary>Monitors changed, or one can be used again: check shortly whether windows should move back.</summary>
+    private void ScheduleReturnCheck()
+    {
+        _returnCheckDue = true;
+        _returnNotBeforeUtc = DateTime.UtcNow.AddMilliseconds(SettledMs);
+    }
+
+    /// <summary>
+    /// Work that waits until monitors have settled after a change (every 2 s, on the learning tick, only in the engine
+    /// that places windows): note the windows of a monitor that went away, keep the main monitor, put windows back after
+    /// sleep, and move windows back to a monitor that's back.
+    /// </summary>
+    private void AfterMonitorChanges(DateTime now)
+    {
+        if (now - _lastDisplayEventUtc < TimeSpan.FromMilliseconds(SettledMs)) return;
+        if (_vanishScanDue) { _vanishScanDue = false; NoteWindowsOfMissingMonitors(); }
+        if (_locked) return; // nothing moves while nobody is looking
+        if (_keepMainDue) { _keepMainDue = false; EnforceMainMonitor(now); }
+        if (_restoreDue) { RestoreAfterSleepTick(now); return; }
+        if (_returnCheckDue && now >= _returnNotBeforeUtc) { _returnCheckDue = false; MoveDisplacedBack(); }
+    }
+
+    /// <summary>Snapshots aren't taken while monitors are changing or just changed, so they never record a pile-up.</summary>
+    private bool CanSnapshot(DateTime now) =>
+        IsMainEngine && !_locked && !_restoreDue && !IsRemoteSession
+        && now - _lastMonitorChangeUtc >= TimeSpan.FromSeconds(MonitorSettleSeconds)
+        && now - _lastDisplayEventUtc >= TimeSpan.FromMilliseconds(SettledMs); // (Windows may be moving windows right now)
+
+    /// <summary>Notes where every app window is (in memory only; window titles aren't kept).</summary>
+    private void TakeSnapshot()
+    {
+        if (!CanSnapshot(DateTime.UtcNow)) return;
+        var snap = new Dictionary<IntPtr, WindowSnap>();
+        foreach (var h in WindowInfo.EnumTopLevel())
+        {
+            if (!Native.IsWindowVisible(h) || Native.IsIconic(h) || WindowInfo.Classify(h, _ownPid) != WindowInfo.Kind.AppWindow) continue;
+            if (Snap(h, ProcessStartOf(h)) is { } s) snap[h] = s;
+        }
+        _snapshot = snap;
+    }
+
+    /// <summary>
+    /// Between snapshots, keeps the window you're using up to date (cheap: no process lookups for windows already
+    /// noted), so a window you just moved to the TV is known to be there when the TV goes away.
+    /// </summary>
+    private void TrackForeground(DateTime now)
+    {
+        if (!CanSnapshot(now)) return;
+        IntPtr fg = Native.GetForegroundWindow();
+        if (fg == IntPtr.Zero || Native.IsIconic(fg)) return;
+        if (_snapshot.TryGetValue(fg, out var old))
+        {
+            if (Snap(fg, old.ProcessStart) is { } s) _snapshot[fg] = s;
+            return;
+        }
+        if (fg == _lastSnapForeground) return; // checked already: not an app window
+        _lastSnapForeground = fg;
+        if (WindowInfo.Classify(fg, _ownPid) == WindowInfo.Kind.AppWindow && Snap(fg, ProcessStartOf(fg)) is { } added)
+            _snapshot[fg] = added;
+    }
+
+    private WindowSnap? Snap(IntPtr h, long processStart)
+    {
+        var m = MonitorByDevice(MonitorService.DeviceOfWindow(h));
+        if (m == null || !Native.GetWindowRect(h, out var r)) return null;
+        return new WindowSnap { Monitor = RefTo(m), MonitorBounds = m.Bounds, Rect = r, Maximized = Native.IsZoomed(h), ProcessStart = processStart };
+    }
+
+    private static long ProcessStartOf(IntPtr h) => WindowInfo.GetProcessStartTime(WindowInfo.GetPid(h));
+
+    private static bool SameRect(Native.RECT a, Native.RECT b) =>
+        Math.Abs(a.Left - b.Left) <= RectSlack && Math.Abs(a.Top - b.Top) <= RectSlack
+        && Math.Abs(a.Right - b.Right) <= RectSlack && Math.Abs(a.Bottom - b.Bottom) <= RectSlack;
+
+    /// <summary>Is this still the same window (not closed, not a handle Windows reused for another program)?</summary>
+    private static bool SameWindow(IntPtr h, long processStart) =>
+        Native.IsWindow(h) && Native.IsWindowVisible(h) && (processStart == 0 || ProcessStartOf(h) == processStart);
+
+    /// <summary>Remembers a window that isn't on its own monitor only because that monitor can't be used right now.</summary>
+    private void AddDisplaced(IntPtr h, string? appKey, MonitorRef? home, WindowSnap? saved)
+    {
+        if (!Native.GetWindowRect(h, out var r)) return;
+        _displaced[h] = new Displaced
+        {
+            AppKey = appKey, Home = home, Saved = saved, DroppedRect = r,
+            DroppedDevice = MonitorService.DeviceOfWindow(h) ?? "",
+            ProcessStart = saved?.ProcessStart ?? ProcessStartOf(h),
+        };
+    }
+
+    /// <summary>Remembers a new window placed on a stand-in monitor (see <see cref="ChooseTarget"/>), if it was.</summary>
+    private void RememberDisplaced(IntPtr h, AppRule? rule, bool displaced, MonitorRef? returnTo)
+    {
+        if (displaced && rule != null) AddDisplaced(h, rule.Key, null, null);
+        else if (returnTo != null) AddDisplaced(h, null, returnTo, null);
+    }
+
+    /// <summary>After the move is checked, note where a displaced window really ended up (the app may have adjusted it).</summary>
+    private void RefreshDropped(IntPtr h)
+    {
+        if (!_displaced.TryGetValue(h, out var d) || !Native.IsWindow(h) || !Native.GetWindowRect(h, out var r)) return;
+        d.DroppedRect = r;
+        d.DroppedDevice = MonitorService.DeviceOfWindow(h) ?? d.DroppedDevice;
+    }
+
+    /// <summary>
+    /// A monitor went away: the windows that were on it (per the last snapshot) were moved by Windows. Note them, so they
+    /// go back when the monitor returns.
+    /// </summary>
+    private void NoteWindowsOfMissingMonitors()
+    {
+        int n = 0;
+        foreach (var (h, s) in _snapshot.ToList())
+        {
+            if (_displaced.ContainsKey(h) || FindMonitor(s.Monitor) != null) continue; // its monitor is still there
+            if (!SameWindow(h, s.ProcessStart) || Native.IsIconic(h)) continue;
+            AddDisplaced(h, null, s.Monitor, s);
+            n++;
+        }
+        if (n > 0) Log.Write($"{n} window{(n == 1 ? " was" : "s were")} on a monitor that went away; {(n == 1 ? "it goes" : "they go")} back when it returns.");
+    }
+
+    /// <summary>Where a displaced window belongs now: (monitor, false) if it can go back, (null, false) to keep waiting, (null, true) to forget it.</summary>
+    private (MonitorInfo? Home, bool Forget) HomeOf(Displaced d)
+    {
+        if (d.AppKey != null)
+        {
+            var rule = Settings.Find(d.AppKey);
+            if (rule == null || rule.NeverMove) return (null, true);
+            var m = Resolve(rule);
+            return m != null && IsAllowed(rule, m) && CanUse(rule, m) ? (m, false) : (null, false);
+        }
+        var home = FindMonitor(d.Home);
+        return home != null && !home.IsSwitchedOff ? (home, false) : (null, false);
+    }
+
+    /// <summary>
+    /// "When a monitor comes back": windows that had to go elsewhere go back to their monitor, once it can be used again.
+    /// Skipped: windows Windows already put back, windows you moved since, and minimized, fullscreen, not-responding or
+    /// administrator windows.
+    /// </summary>
+    private void MoveDisplacedBack()
+    {
+        if (_displaced.Count == 0 || !Settings.Enabled || IsRemoteSession) return;
+        int generation = _topologyGeneration;
+        var movedTo = new Dictionary<string, List<string>>();
+        foreach (var (h, d) in _displaced.ToList())
+        {
+            var (home, forget) = HomeOf(d);
+            if (forget) { _displaced.Remove(h); continue; }
+            if (home == null) continue; // its monitor still can't be used: keep waiting
+            _displaced.Remove(h);
+            if (!Settings.MoveBackWhenMonitorReturns || !SameWindow(h, d.ProcessStart)) continue;
+            var current = MonitorOfWindow(h);
+            if (current != null && current.DeviceName == home.DeviceName) continue;               // already back
+            if (!Native.GetWindowRect(h, out var now) || !SameRect(now, d.DroppedRect)) continue; // you moved it
+            if (!CanMoveNow(h, current)) continue;
+            var result = PutBack(h, d.Saved, home, generation);
+            if (result == WindowMover.Result.Aborted)
+            {
+                _displaced[h] = d; // monitors changed again: try once they've settled
+                ScheduleReturnCheck();
+                break;
+            }
+            if (result != WindowMover.Result.Moved) continue;
+            if (!movedTo.TryGetValue(home.Name, out var names)) movedTo[home.Name] = names = new List<string>();
+            names.Add(WindowInfo.Identify(h)?.DisplayName ?? "a window");
+        }
+        foreach (var (monitor, names) in movedTo)
+            Note($"{monitor} is back: moved {string.Join(", ", names.Distinct())} back there.", "");
+    }
+
+    /// <summary>Windows that are never moved behind your back: minimized, fullscreen, not responding, or run as administrator.</summary>
+    private bool CanMoveNow(IntPtr h, MonitorInfo? current) =>
+        !Native.IsIconic(h) && !Native.IsHungAppWindow(h) && !WindowMover.IsFullscreen(h, current)
+        && (_selfElevated || !WindowInfo.IsProcessElevated(WindowInfo.GetPid(h)));
+
+    /// <summary>
+    /// Puts a window back on a monitor: exactly where it was (<paramref name="saved"/>) if that monitor still has the
+    /// same size and position, else centred on it. Maximized windows are maximized there again.
+    /// </summary>
+    private WindowMover.Result PutBack(IntPtr h, WindowSnap? saved, MonitorInfo target, int generation)
+    {
+        Func<bool> stillValid = () => generation == _topologyGeneration;
+        bool sameMonitor = saved != null && SameRect(saved.MonitorBounds, target.Bounds);
+        bool onTarget = string.Equals(MonitorService.DeviceOfWindow(h), target.DeviceName, StringComparison.OrdinalIgnoreCase);
+        if (saved == null || !sameMonitor) return onTarget ? WindowMover.Result.Moved : WindowMover.Move(h, target, stillValid);
+        if (!saved.Maximized) return WindowMover.PlaceAt(h, target, saved.Rect, stillValid);
+        if (!onTarget)
+        {
+            var r = WindowMover.Move(h, target, stillValid);
+            if (r != WindowMover.Result.Moved) return r;
+        }
+        if (!Native.IsZoomed(h) && WindowMover.Responds(h)) Native.ShowWindow(h, Native.SW_MAXIMIZE);
+        return WindowMover.Result.Moved;
+    }
+
+    /// <summary>
+    /// "Put windows back after sleep": once you're signed in again and monitors have settled (and every monitor from
+    /// before is back, or a minute has passed), note where windows are, wait a few seconds, then put back the ones that
+    /// moved during sleep and that you haven't moved since.
+    /// </summary>
+    private void RestoreAfterSleepTick(DateTime now)
+    {
+        var snap = _sleepSnapshot;
+        if (snap == null || !Settings.Enabled || !Settings.RestoreAfterSleep || IsRemoteSession) { EndRestore(); return; }
+        bool allBack = snap.Values.All(s => FindMonitor(s.Monitor) != null);
+        if (!allBack && now < _restoreDeadlineUtc) return;
+        if (_restoreBaseline == null || _restoreBaselineGeneration != _topologyGeneration)
+        {
+            _restoreBaseline = new Dictionary<IntPtr, Native.RECT>();
+            foreach (var h in snap.Keys.ToList())
+                if (Native.IsWindow(h) && Native.GetWindowRect(h, out var r)) _restoreBaseline[h] = r;
+            _restoreBaselineUtc = now;
+            _restoreBaselineGeneration = _topologyGeneration;
+            return;
+        }
+        if (now - _restoreBaselineUtc < TimeSpan.FromMilliseconds(SettledMs)) return;
+        RestoreWindows(snap, _restoreBaseline);
+        EndRestore();
+        ScheduleReturnCheck(); // windows of a monitor that isn't back yet go back when it is
+    }
+
+    private void EndRestore()
+    {
+        _restoreDue = false;
+        _sleepSnapshot = null;
+        _restoreBaseline = null;
+        _movedSinceWake.Clear();
+    }
+
+    private void RestoreWindows(Dictionary<IntPtr, WindowSnap> snap, Dictionary<IntPtr, Native.RECT> baseline)
+    {
+        int generation = _topologyGeneration;
+        var names = new List<string>();
+        foreach (var (h, s) in snap.ToList()) // (a copy: window events can arrive while a move waits for an app)
+        {
+            if (!SameWindow(h, s.ProcessStart) || !baseline.TryGetValue(h, out var before)) continue;
+            if (_movedSinceWake.Contains(h)) continue; // you dragged it after waking up
+            if (!Native.GetWindowRect(h, out var now) || !SameRect(now, before)) continue; // you moved it after waking up
+            var target = FindMonitor(s.Monitor);
+            if (target == null || target.IsSwitchedOff)
+            {
+                if (!_displaced.ContainsKey(h)) AddDisplaced(h, null, s.Monitor, s); // goes back when its monitor does
+                continue;
+            }
+            var current = MonitorOfWindow(h);
+            bool onTarget = current?.DeviceName == target.DeviceName;
+            if (onTarget && (s.Maximized ? Native.IsZoomed(h) : SameRect(now, s.Rect))) continue; // already where it was
+            if (onTarget && !SameRect(s.MonitorBounds, target.Bounds)) continue; // that monitor changed size: can't tell where
+            if (!CanMoveNow(h, current)) continue;
+            var result = PutBack(h, s, target, generation);
+            if (result == WindowMover.Result.Aborted) break; // monitors changed again
+            if (result != WindowMover.Result.Moved) continue;
+            _displaced.Remove(h);
+            names.Add(WindowInfo.Identify(h)?.DisplayName ?? "a window");
+        }
+        if (names.Count > 0)
+            Note($"After sleep: put {names.Count} window{(names.Count == 1 ? "" : "s")} back where {(names.Count == 1 ? "it was" : "they were")} " +
+                 $"({string.Join(", ", names.Distinct())}).", "");
+    }
+
+    /// <summary>
+    /// "Keep my main monitor": if Windows made another monitor main, make the chosen one main again. At most twice in
+    /// five minutes; after that it stops (a driver that keeps changing it back would otherwise cause a loop).
+    /// </summary>
+    private void EnforceMainMonitor(DateTime now)
+    {
+        var want = Settings.KeepMainMonitor;
+        if (want == null || !Settings.Enabled || IsRemoteSession || HasDuplicatedMonitors || _monitors.Count < 2) return;
+        if (Settings.KeepMainStopped) return;
+        var keep = FindMonitor(want);
+        if (keep == null || keep.IsPrimary) return;
+        _mainFixes.RemoveAll(t => now - t > KeepMainPeriod);
+        if (_mainFixes.Count >= KeepMainMaxFixes)
+        {
+            StopKeepingMain();
+            Note($"Keep my main monitor: Windows keeps making another monitor main, so it's no longer changed back to {keep.Name}. " +
+                 "Turn \"Keep my main monitor\" off and on to try again.", "");
+            Notice?.Invoke("Main monitor not changed back",
+                $"Windows keeps making another monitor main, so Monitor Window Control stopped changing it back to {keep.Name}.");
+            return;
+        }
+        _mainFixes.Add(now);
+        string was = MainMonitor?.Name ?? "another monitor";
+        string? error = ChangeMainMonitor(keep);
+        if (error != null) { Log.Write($"Keep my main monitor: couldn't make {keep.Name} main again. {error}"); return; }
+        Note($"Windows made {was} the main monitor; changed it back to {keep.Name} (keep my main monitor).", $"[{keep.DeviceName}]");
+        if (_keepMainNoticeShown) return;
+        _keepMainNoticeShown = true;
+        Notice?.Invoke("Main monitor changed back", $"Windows made {was} the main monitor; Monitor Window Control changed it back to {keep.Name}.");
+    }
+
+    /// <summary>Saves that "Keep my main monitor" stopped, so the settings window (and the helper) can say so.</summary>
+    private void StopKeepingMain()
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (Settings.KeepMainMonitor == null) return;
+        Settings.KeepMainStopped = true;
+        Save();
+        Changed?.Invoke();
+    }
+
+    /// <summary>A "switched off for 1 hour" is over: the monitor counts as on again (and windows can move back to it).</summary>
+    private void OffTimeOver()
+    {
+        var wasOff = _monitors.Where(m => m.IsSwitchedOff).ToList();
+        _nextOffExpiryUtc = DateTime.MaxValue;
+        RefreshMonitors(); // works out "switched off" again with the time now
+        var back = wasOff.Where(m => MonitorByDevice(m.DeviceName) is { IsSwitchedOff: false }).Select(m => m.Name).ToList();
+        if (back.Count == 0) return;
+        if (IsMainEngine) Note($"{string.Join(", ", back)}: the hour is over, so it's treated as switched on again.", "");
         Changed?.Invoke();
     }
 
@@ -875,7 +1482,7 @@ public sealed class Engine : IDisposable
         rule.AllowedMonitors = allowed.Select(RefTo).ToList();
         // Start from where it is now / was last, if that's allowed; otherwise the first allowed monitor.
         var start = new[] { currentMonitor, Resolve(rule) }.FirstOrDefault(m => m != null && IsAllowed(rule, m))
-                    ?? AllowedConnected(rule).FirstOrDefault();
+                    ?? AllowedInOrder(rule).FirstOrDefault();
         SetMonitor(rule, start);
         rule.UpdatedUtc = DateTime.UtcNow;
         Save();
@@ -889,8 +1496,27 @@ public sealed class Engine : IDisposable
     /// Makes a monitor the main display in Windows itself (same as Settings → Display → "Make this my main display").
     /// Windows requires the main display to sit at (0,0), so every display is shifted by the same amount;
     /// the physical arrangement stays the same. Returns an error message, or null on success.
+    /// With "Keep my main monitor" on, the new main monitor becomes the one that's kept.
     /// </summary>
     public string? SetMainMonitor(MonitorInfo target)
+    {
+        string? error = ChangeMainMonitor(target);
+        if (error != null) return error;
+        Note($"Main monitor is now {target.Name} (changed in Windows).", $"[{target.DeviceName}]");
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (Settings.KeepMainMonitor == null) return null;
+        var main = MainMonitor ?? target;
+        Settings.KeepMainMonitor = RefTo(main);
+        Settings.KeepMainStopped = false; _mainFixes.Clear();
+        Save();
+        Log.Write($"Keep my main monitor: now keeps {main.Name}.");
+        Changed?.Invoke();
+        return null;
+    }
+
+    /// <summary>Makes a monitor the main display in Windows (see <see cref="SetMainMonitor"/>). Returns an error message, or null.</summary>
+    private string? ChangeMainMonitor(MonitorInfo target)
     {
         var dm = NewDevMode();
         if (!Native.EnumDisplaySettings(target.DeviceName, Native.ENUM_CURRENT_SETTINGS, ref dm))
@@ -939,7 +1565,6 @@ public sealed class Engine : IDisposable
             return $"Windows refused the change (code {apply}).";
         }
         RefreshMonitors();
-        Note($"Main monitor is now {target.Name} (changed in Windows).", $"[{target.DeviceName}]");
         return null;
     }
 
@@ -983,14 +1608,134 @@ public sealed class Engine : IDisposable
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
         m = MonitorByDevice(m.DeviceName) ?? m; // the window's copy may be from before the last refresh
-        var t = m.Targets[0];
-        Settings.MonitorOptions.RemoveAll(o => MatchesTarget(o.Monitor, t));
-        if (temporary != t.IsTemporaryByDefault)
-            Settings.MonitorOptions.Add(new MonitorOptions { Monitor = RefTo(m, t), Temporary = temporary });
+        OptionsFor(m).Temporary = temporary != m.Targets[0].IsTemporaryByDefault ? temporary : null;
+        Settings.MonitorOptions.RemoveAll(o => o.IsEmpty);
         Save();
         RefreshMonitors();
         Note(temporary ? $"{m.Name} is a temporary monitor: apps aren't learned there."
                        : $"{m.Name} is a normal monitor: apps can be learned there.", $"[{m.DeviceName}]");
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// "Treat as switched off": while on, new windows don't open on this monitor (they go where they would go if it
+    /// were disconnected) and nothing is learned there. <paramref name="duration"/> null = until you turn it back on.
+    /// Turning it back on moves back the windows that had to go elsewhere (see "When a monitor comes back").
+    /// </summary>
+    public void SetMonitorSwitchedOff(MonitorInfo m, bool off, TimeSpan? duration = null)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        m = MonitorByDevice(m.DeviceName) ?? m;
+        var o = OptionsFor(m);
+        o.Off = off;
+        o.OffUntilUtc = off && duration != null ? DateTime.UtcNow + duration.Value : null;
+        Settings.MonitorOptions.RemoveAll(x => x.IsEmpty);
+        Save();
+        RefreshMonitors();
+        ResetStreak();
+        Note(!off ? $"{m.Name} is treated as switched on again."
+                  : duration == null ? $"{m.Name} is treated as switched off until you turn it back on: new windows open elsewhere."
+                  : $"{m.Name} is treated as switched off until {o.OffUntilUtc!.Value.ToLocalTime():t}: new windows open elsewhere.",
+             $"[{m.DeviceName}]");
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// "What can open here": any app, or only apps you chose for this monitor (learning never makes it a home, and
+    /// other apps' new windows that Windows opens there are moved off it).
+    /// </summary>
+    public void SetMonitorOnlyChosenApps(MonitorInfo m, bool onlyChosen)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        m = MonitorByDevice(m.DeviceName) ?? m;
+        OptionsFor(m).OnlyChosenApps = onlyChosen;
+        Settings.MonitorOptions.RemoveAll(x => x.IsEmpty);
+        Save();
+        RefreshMonitors();
+        ResetStreak();
+        Note(onlyChosen ? $"{m.Name}: only apps you choose open here." : $"{m.Name}: any app can open here.", $"[{m.DeviceName}]");
+        Changed?.Invoke();
+    }
+
+    /// <summary>"Keep my main monitor": on = keep the current main monitor as main; off = let Windows decide.</summary>
+    public void SetKeepMainMonitor(bool on)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var main = MainMonitor;
+        if (on && main == null) return;
+        Settings.KeepMainMonitor = on ? RefTo(main!) : null;
+        Settings.KeepMainStopped = false; _mainFixes.Clear();
+        Save();
+        Note(on ? $"Keep my main monitor: {main!.Name} stays the main monitor." : "Keep my main monitor: off.", "");
+        Changed?.Invoke();
+    }
+
+    /// <summary>"When an app's monitor is off", for all apps: <paramref name="mode"/> is null (main monitor) or one of <see cref="FallbackModes"/>.</summary>
+    public void SetDefaultFallback(string? mode, MonitorInfo? monitor)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        (Settings.Fallback, Settings.FallbackMonitor) = FallbackChoice(mode == FallbackModes.Main ? null : mode, monitor);
+        Save();
+        Log.Write("When an app's monitor is off: " + FallbackText(Settings.Fallback, Settings.FallbackMonitor));
+        Changed?.Invoke();
+    }
+
+    /// <summary>"If it's off, open on" for one saved app: null = the choice for all apps, or one of <see cref="FallbackModes"/>.</summary>
+    public void SetAppFallback(string key, string? mode, MonitorInfo? monitor)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var rule = Settings.Find(key);
+        if (rule == null) return;
+        var (newMode, newMonitor) = FallbackChoice(mode, monitor);
+        if (rule.Fallback == newMode && (newMonitor == null ? rule.FallbackMonitor == null
+                                          : rule.FallbackMonitor != null && RefKey(rule.FallbackMonitor) == RefKey(newMonitor))) return;
+        rule.Fallback = newMode; rule.FallbackMonitor = newMonitor;
+        rule.UpdatedUtc = DateTime.UtcNow;
+        Save();
+        Log.Write($"Set by you: if its monitor is off, {rule.DisplayName} opens on {FallbackText(rule.Fallback, rule.FallbackMonitor, forApp: true)}.  [{rule.Key}]");
+        Changed?.Invoke();
+    }
+
+    /// <summary>A fallback choice as it's saved: a known mode, with a monitor only for <see cref="FallbackModes.Monitor"/>.</summary>
+    private static (string? mode, MonitorRef? monitor) FallbackChoice(string? mode, MonitorInfo? monitor)
+    {
+        if (mode != FallbackModes.Monitor) return (FallbackModes.Normalize(mode, null), null);
+        return monitor == null ? (null, null) : (FallbackModes.Monitor, RefTo(monitor));
+    }
+
+    /// <summary>A fallback choice in words ("main monitor", "2 · Side", "where Windows puts it").</summary>
+    public string FallbackText(string? mode, MonitorRef? monitor, bool forApp = false) => mode switch
+    {
+        FallbackModes.Leave => "where Windows puts it",
+        FallbackModes.Monitor => FindMonitor(monitor)?.Name ?? $"{monitor?.Name ?? monitor?.Device} (not connected)",
+        FallbackModes.Main => "the main monitor",
+        _ => forApp ? "the same monitor as other apps" : "the main monitor",
+    };
+
+    /// <summary>"When a monitor comes back": move windows that had to go elsewhere back to it, or leave them.</summary>
+    public void SetMoveBackWhenMonitorReturns(bool on)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (Settings.MoveBackWhenMonitorReturns == on) return;
+        Settings.MoveBackWhenMonitorReturns = on; Save();
+        Log.Write("When a monitor comes back: " + (on ? "move its windows back" : "leave them"));
+        Changed?.Invoke();
+    }
+
+    /// <summary>"Put windows back after sleep".</summary>
+    public void SetRestoreAfterSleep(bool on)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (Settings.RestoreAfterSleep == on) return;
+        Settings.RestoreAfterSleep = on; Save();
+        Log.Write("Put windows back after sleep: " + (on ? "on" : "off"));
         Changed?.Invoke();
     }
 
@@ -1242,6 +1987,26 @@ internal static class WindowMover
         {
             if (wasMaximized) Native.ShowWindow(hwnd, Native.SW_MAXIMIZE);
         }
+        return string.Equals(MonitorService.DeviceOfWindow(hwnd), target.DeviceName, StringComparison.OrdinalIgnoreCase)
+            ? Result.Moved : Result.Failed;
+    }
+
+    /// <summary>
+    /// Puts a (not maximized) window back at an exact spot on the target monitor, in the same two steps as
+    /// <see cref="Move"/>: first only its position, so the app can rescale for that monitor's DPI, then its size.
+    /// Stops with <see cref="Result.Aborted"/> if monitors changed in between.
+    /// </summary>
+    public static Result PlaceAt(IntPtr hwnd, MonitorInfo target, Native.RECT rect, Func<bool>? stillValid)
+    {
+        if (!Responds(hwnd)) return Result.Failed;
+        if (!LiveWorkArea(target, out var wa) || stillValid?.Invoke() == false) return Result.Aborted;
+        if (Native.IsZoomed(hwnd)) Native.ShowWindow(hwnd, Native.SW_RESTORE);
+        uint startDpi = Native.GetDpiForWindow(hwnd), targetDpi = MonitorDpi(target);
+        Native.SetWindowPos(hwnd, IntPtr.Zero, rect.Left, rect.Top, 0, 0, MoveFlags | Native.SWP_NOSIZE);
+        WaitForDpi(hwnd, startDpi, targetDpi);
+        if (!LiveWorkArea(target, out wa) || stillValid?.Invoke() == false) return Result.Aborted;
+        Native.SetWindowPos(hwnd, IntPtr.Zero, rect.Left, rect.Top, rect.Width, rect.Height, MoveFlags);
+        KeepInside(hwnd, wa);
         return string.Equals(MonitorService.DeviceOfWindow(hwnd), target.DeviceName, StringComparison.OrdinalIgnoreCase)
             ? Result.Moved : Result.Failed;
     }

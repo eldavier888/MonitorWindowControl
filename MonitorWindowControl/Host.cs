@@ -13,8 +13,10 @@ public interface IEngineTimer
 /// <summary>
 /// What the engine needs from the program it runs in: timers on its thread.
 /// The settings app provides it with WPF; the tiny helper with a plain Windows message loop.
-/// The host also calls <see cref="Engine.OnDisplaySettingsChanged"/> when monitors change, and
-/// <see cref="Engine.OnSessionChanged"/> when Remote Desktop connects or disconnects.
+/// The host also calls <see cref="Engine.OnDisplaySettingsChanged"/> when monitors change,
+/// <see cref="Engine.OnSessionChanged"/> when Remote Desktop connects or disconnects,
+/// <see cref="Engine.OnSessionLock"/> when the session locks or unlocks, and <see cref="Engine.OnSuspending"/> /
+/// <see cref="Engine.OnResumed"/> before the PC sleeps and after it wakes up.
 /// </summary>
 public interface IEngineHost
 {

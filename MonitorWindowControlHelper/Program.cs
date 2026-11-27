@@ -58,6 +58,8 @@ internal static class Program
         using var engine = new Engine(host);
         host.DisplayChanged = engine.OnDisplaySettingsChanged;
         host.SessionChanged = engine.OnSessionChanged;
+        host.LockChanged = engine.OnSessionLock;
+        host.PowerChanged = sleeping => { if (sleeping) engine.OnSuspending(); else engine.OnResumed(); };
         engine.Start(importLegacy: false, who: "Helper");
 
         if (engine.Settings.RunMode != RunModes.Helper)
@@ -98,6 +100,8 @@ internal static class Program
         using var engine = new Engine(host);
         host.DisplayChanged = engine.OnDisplaySettingsChanged;
         host.SessionChanged = engine.OnSessionChanged;
+        host.LockChanged = engine.OnSessionLock;
+        host.PowerChanged = sleeping => { if (sleeping) engine.OnSuspending(); else engine.OnResumed(); };
         engine.Start(importLegacy: false, who: $"Shortcut for {key ?? target}");
 
         // The saved launch target is kept up to date (apps that update themselves can move); prefer it.

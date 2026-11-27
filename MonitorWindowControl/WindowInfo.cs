@@ -302,6 +302,12 @@ internal static class WindowInfo
         finally { Native.CloseHandle(hp); }
     }
 
+    /// <summary>
+    /// When the process started (as a FILETIME), or 0 if Windows doesn't say. Tells a window handle that Windows reused
+    /// for another program apart from the window it used to be.
+    /// </summary>
+    public static long GetProcessStartTime(int pid) => StartTime(pid);
+
     /// <summary>True if the process runs as admin (or we can't even look at it, which means the same for us).</summary>
     public static bool IsProcessElevated(int pid)
     {

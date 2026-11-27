@@ -55,6 +55,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 ## Must have
 
 ### 0. Send windows back when their monitor comes back (TV on, wake, redock)
+**Status:** partly built: 'Ask me' is left out (a tray balloon can't hold Move and Leave buttons, and the helper has no tray icon), and the fake-monitor-source Engine tests wait for the test project (item 27).
 
 *Monitor changes · effort M*
 
@@ -93,6 +94,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Launching an app during wake feels up to 3 s slower. Keep the cap small. Test with a fake monitor source that changes between the two SetWindowPos calls.
 
 ### 3. 'Monitor is off' switch: keep new windows off a dark but connected TV
+**Status:** partly built: the manual switch is built (Monitors page card and tray Monitors menu, until turned back on or for 1 hour); the optional DDC/CI 'Detect automatically' is not built, because it needs a background thread with slow calls and many TVs don't support it. The flag lives in the existing MonitorOptions entry instead of a renamed MonitorSettings.
 
 *Monitor changes · effort M*
 
@@ -143,6 +145,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 ## Should have
 
 ### 7. Ordered fallback: 'If that monitor is off, use…' per app plus a global default
+**Status:** built in v1.6.0
 
 *Placement · effort S*
 
@@ -227,6 +230,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Low. Don't inject into other apps' system menus (that needs a global hook DLL that antivirus tools flag).
 
 ### 14. Keep my main monitor (stop Windows promoting the TV)
+**Status:** built in v1.6.0 (a toggle that keeps the monitor that was main when it was turned on, instead of a monitor drop-down, so turning it on never changes the main monitor by surprise; Make main changes which one is kept).
 
 *Monitors · effort S*
 
@@ -263,6 +267,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Over-pausing during borderless video playback; the per-app override and 'presentation' semantics limit it. SHQueryUserNotificationState is cheap and can be checked on each placement and learn tick.
 
 ### 17. 'What can open here' per monitor (reserve the TV for chosen apps)
+**Status:** built in v1.6.0
 
 *Monitors · effort S*
 
@@ -275,6 +280,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** Low. Make sure the 'Where I used it last' allowed list still works when it includes a reserved monitor.
 
 ### 18. Restore window positions after sleep and hibernate
+**Status:** partly built: the snapshot, wake-up restore and 'skip windows touched after waking' are built; the tray and Tidy-up 'Put windows back where they were' command with Undo waits for items 4 and 10. On PCs with Modern Standby, Windows may not send the sleep notification, so the restore may not run there.
 
 *Monitor changes · effort L*
 

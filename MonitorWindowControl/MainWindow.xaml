@@ -170,6 +170,38 @@
                             </ComboBox>
                         </ui:CardControl>
 
+                        <TextBlock Style="{StaticResource SectionHeader}" Text="When monitors change" />
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=DesktopArrowDown24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="When an app's monitor is off" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Where apps open while their own monitor is disconnected or switched off. You can choose something else for one app on the Apps page." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ComboBox x:Name="FallbackCombo" MinWidth="250" AutomationProperties.Name="When an app's monitor is off, open it on" SelectionChanged="FallbackCombo_SelectionChanged" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=ArrowHookUpLeft24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="When a monitor comes back" />
+                                    <TextBlock x:Name="ReturnHint" Style="{StaticResource Secondary}" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ComboBox x:Name="ReturnCombo" MinWidth="250" AutomationProperties.Name="When a monitor comes back" SelectionChanged="ReturnCombo_SelectionChanged">
+                                <ComboBoxItem Content="Move its windows back" />
+                                <ComboBoxItem Content="Leave them where they are" />
+                            </ComboBox>
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=WeatherMoon24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Put windows back after sleep" />
+                                    <TextBlock x:Name="SleepHint" Style="{StaticResource Secondary}" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:ToggleSwitch x:Name="SleepToggle" AutomationProperties.Name="Put windows back after sleep" Click="SleepToggle_Click" />
+                        </ui:CardControl>
+
                         <TextBlock Style="{StaticResource SectionHeader}" Text="Startup" />
                         <ui:CardControl Icon="{ui:SymbolIcon Symbol=Rocket24}">
                             <ui:CardControl.Header>
@@ -229,10 +261,52 @@
                                             <ui:ToggleSwitch IsChecked="{Binding AppsCanOpenHere, Mode=OneWay}" Click="AppsCanOpenHere_Click"
                                                              AutomationProperties.Name="{Binding Name, StringFormat='Apps can open on {0}'}" />
                                         </ui:CardControl>
+                                        <!-- A TV that stays connected when it's turned off with its remote -->
+                                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=DesktopOff24}" Margin="40,0,0,4"
+                                                        Visibility="{Binding ShowMonitorChoices, Converter={StaticResource ShowWhenTrue}}">
+                                            <ui:CardControl.Header>
+                                                <StackPanel Margin="0,0,16,0">
+                                                    <TextBlock Style="{StaticResource CardTitle}" Text="Treat as switched off" />
+                                                    <TextBlock Style="{StaticResource Secondary}" Text="{Binding SwitchedOffNote}" />
+                                                </StackPanel>
+                                            </ui:CardControl.Header>
+                                            <ComboBox MinWidth="200" SelectedIndex="{Binding SwitchedOffIndex, Mode=OneWay}"
+                                                      SelectionChanged="SwitchedOff_SelectionChanged" PreviewMouseWheel="Combo_PreviewMouseWheel"
+                                                      AutomationProperties.Name="{Binding Name, StringFormat='Treat {0} as switched off'}">
+                                                <ComboBoxItem Content="No" />
+                                                <ComboBoxItem Content="Until I turn it back on" />
+                                                <ComboBoxItem Content="For 1 hour" />
+                                            </ComboBox>
+                                        </ui:CardControl>
+                                        <!-- Keep a monitor (a TV) for a few chosen apps -->
+                                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=LockClosed24}" Margin="40,0,0,4"
+                                                        Visibility="{Binding ShowMonitorChoices, Converter={StaticResource ShowWhenTrue}}">
+                                            <ui:CardControl.Header>
+                                                <StackPanel Margin="0,0,16,0">
+                                                    <TextBlock Style="{StaticResource CardTitle}" Text="What can open here" />
+                                                    <TextBlock Style="{StaticResource Secondary}" Text="{Binding OpenHereNote}" />
+                                                </StackPanel>
+                                            </ui:CardControl.Header>
+                                            <ComboBox MinWidth="200" SelectedIndex="{Binding OpenHereIndex, Mode=OneWay}"
+                                                      SelectionChanged="OpenHere_SelectionChanged" PreviewMouseWheel="Combo_PreviewMouseWheel"
+                                                      AutomationProperties.Name="{Binding Name, StringFormat='What can open on {0}'}">
+                                                <ComboBoxItem Content="Any app" />
+                                                <ComboBoxItem Content="Only apps I choose" />
+                                            </ComboBox>
+                                        </ui:CardControl>
                                     </StackPanel>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
+                        <ui:CardControl x:Name="KeepMainCard" Icon="{ui:SymbolIcon Symbol=DesktopCheckmark24}" Margin="0,12,0,4">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Keep my main monitor" />
+                                    <TextBlock x:Name="KeepMainHint" Style="{StaticResource Secondary}" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:ToggleSwitch x:Name="KeepMainToggle" AutomationProperties.Name="Keep my main monitor" Click="KeepMainToggle_Click" />
+                        </ui:CardControl>
                         <TextBlock Style="{StaticResource SectionHeader}" Text="Related settings" />
                         <ui:CardControl Icon="{ui:SymbolIcon Symbol=LinkSquare24}">
                             <ui:CardControl.Header>
@@ -316,14 +390,16 @@
                                         <!-- Only for "Where I used it last": which monitors the app may open on -->
                                         <StackPanel x:Name="AllowedPanel" Margin="0,12,0,0" Visibility="Collapsed">
                                             <TextBlock Style="{StaticResource Secondary}" FontSize="13"
-                                                       Text="It opens on whichever of these monitors you used it on last:" />
-                                            <ItemsControl x:Name="AllowedList" Margin="0,6,0,0">
-                                                <ItemsControl.ItemsPanel>
-                                                    <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
-                                                </ItemsControl.ItemsPanel>
-                                            </ItemsControl>
+                                                       Text="It opens on whichever of these monitors you used it on last. If that one is off, it opens on the next one in this order:" />
+                                            <ItemsControl x:Name="AllowedList" Margin="0,6,0,0" KeyboardNavigation.TabNavigation="Continue" />
                                             <TextBlock x:Name="LastUsedLaunchOnlyNote" Style="{StaticResource Secondary}" Margin="0,4,0,0" Visibility="Collapsed"
                                                        Text="Note: with nothing running in the background, Monitor Window Control can't see where you use the app, so it opens where it was used when you last changed this." />
+                                        </StackPanel>
+                                        <!-- Where it opens while its monitor is off or disconnected -->
+                                        <StackPanel x:Name="AppFallbackPanel" Margin="0,12,0,0">
+                                            <TextBlock Text="If it's off, open on" Margin="0,0,0,6" />
+                                            <ComboBox x:Name="AppFallbackCombo" HorizontalAlignment="Stretch"
+                                                      AutomationProperties.Name="If its monitor is off, open it on" />
                                         </StackPanel>
                                         <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
                                             <ui:Button Content="Save" Appearance="Primary" MinWidth="96" Click="ChangeMonitor_Click" />

@@ -67,7 +67,18 @@ public sealed class AppRule
     /// updated every time you use it on one of <see cref="AllowedMonitors"/> (empty = any monitor).
     /// </summary>
     public bool FollowLastUsed { get; set; }
+    /// <summary>
+    /// The monitors a "Where I used it last" app may open on, in your order: when the one it was used on last is off,
+    /// the first of the others that's on is used. Older files have them in any order, which keeps working.
+    /// </summary>
     public List<MonitorRef> AllowedMonitors { get; set; } = new();
+    /// <summary>
+    /// "If it's off, open on": where it opens while its own monitor is off or disconnected. Null = the choice for all
+    /// apps (<see cref="AppSettings.Fallback"/>); otherwise one of <see cref="FallbackModes"/>.
+    /// </summary>
+    public string? Fallback { get; set; }
+    /// <summary>The monitor for <see cref="FallbackModes.Monitor"/>.</summary>
+    public MonitorRef? FallbackMonitor { get; set; }
     /// <summary>How to start the app for launch-only shortcuts: "exe:C:\...\app.exe" or "aumid:Package!App". Null = unknown yet.</summary>
     public string? LaunchTarget { get; set; }
     /// <summary>File name (without .lnk) of this app's launch shortcut, fixed when it was created. Null = none made.</summary>
@@ -126,6 +137,37 @@ public sealed class MonitorOptions
     /// false = a normal monitor; null = decided by how it's connected (wireless and virtual monitors are temporary).
     /// </summary>
     public bool? Temporary { get; set; }
+    /// <summary>"Treat as switched off": new windows open on another monitor, and nothing is learned here.</summary>
+    public bool Off { get; set; }
+    /// <summary>When "switched off" ends by itself (null = until you turn it back on).</summary>
+    public DateTime? OffUntilUtc { get; set; }
+    /// <summary>
+    /// "What can open here: only apps I choose": apps aren't learned here, and other apps' new windows that Windows
+    /// opens here are moved to another monitor.
+    /// </summary>
+    public bool OnlyChosenApps { get; set; }
+
+    /// <summary>True while "switched off" applies at this moment.</summary>
+    public bool IsOffAt(DateTime utc) => Off && (OffUntilUtc == null || OffUntilUtc > utc);
+
+    /// <summary>True when nothing is chosen (the entry can be removed).</summary>
+    [JsonIgnore]
+    public bool IsEmpty => Temporary == null && !Off && !OnlyChosenApps;
+}
+
+/// <summary>Where an app opens while its own monitor is off or disconnected (see <see cref="AppRule.Fallback"/>).</summary>
+public static class FallbackModes
+{
+    /// <summary>The main monitor (what older versions always did).</summary>
+    public const string Main = "Main";
+    /// <summary>A monitor you chose.</summary>
+    public const string Monitor = "Monitor";
+    /// <summary>Leave it where Windows puts it.</summary>
+    public const string Leave = "Leave";
+
+    /// <summary>A known mode, or null for anything else (and for a monitor choice without a monitor).</summary>
+    public static string? Normalize(string? mode, MonitorRef? monitor) =>
+        mode is Main or Leave ? mode : mode == Monitor && monitor != null ? Monitor : null;
 }
 
 /// <summary>Your own name and/or number for a monitor.</summary>
@@ -154,6 +196,24 @@ public sealed class AppSettings
     public List<MonitorOptions> MonitorOptions { get; set; } = new();
     /// <summary>true = don't move windows while this PC is used through Remote Desktop (learning always pauses then).</summary>
     public bool PauseDuringRemoteDesktop { get; set; } = true;
+    /// <summary>
+    /// "When an app's monitor is off", for all apps: null or <see cref="FallbackModes.Main"/> = the main monitor,
+    /// <see cref="FallbackModes.Monitor"/> = <see cref="FallbackMonitor"/>, <see cref="FallbackModes.Leave"/> = leave it.
+    /// </summary>
+    public string? Fallback { get; set; }
+    /// <summary>The monitor for <see cref="FallbackModes.Monitor"/>.</summary>
+    public MonitorRef? FallbackMonitor { get; set; }
+    /// <summary>"When a monitor comes back": true = move windows that had to go elsewhere back to it; false = leave them.</summary>
+    public bool MoveBackWhenMonitorReturns { get; set; } = true;
+    /// <summary>"Put windows back after sleep": after waking up, windows go back where they were before sleep.</summary>
+    public bool RestoreAfterSleep { get; set; } = true;
+    /// <summary>"Keep my main monitor": the monitor to keep as main in Windows (null = off).</summary>
+    public MonitorRef? KeepMainMonitor { get; set; }
+    /// <summary>
+    /// "Keep my main monitor" stopped because Windows kept making another monitor main (turning it off and on, or
+    /// pressing Make main, starts it again). Saved, so the helper and the settings window agree.
+    /// </summary>
+    public bool KeepMainStopped { get; set; }
 
     public AppRule? Find(string key) =>
         Apps.FirstOrDefault(a => string.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase));
@@ -285,14 +345,33 @@ public static class SettingsStore
             a.AllowedMonitors.RemoveAll(m => m == null);
             foreach (var m in a.AllowedMonitors) CleanRef(m);
             a.MonitorHardware = MonitorHardware.Clean(a.MonitorHardware);
+            (a.Fallback, a.FallbackMonitor) = CleanFallback(a.Fallback, a.FallbackMonitor);
         }
         s.MonitorNicknames ??= new();
         s.MonitorNicknames.RemoveAll(n => n == null || n.Monitor == null);
         foreach (var n in s.MonitorNicknames) { CleanRef(n.Monitor); n.Nickname ??= ""; }
         s.MonitorOptions ??= new();
-        s.MonitorOptions.RemoveAll(o => o == null || o.Monitor == null || o.Temporary == null);
-        foreach (var o in s.MonitorOptions) CleanRef(o.Monitor);
+        s.MonitorOptions.RemoveAll(o => o == null || o.Monitor == null);
+        var now = DateTime.UtcNow;
+        foreach (var o in s.MonitorOptions)
+        {
+            CleanRef(o.Monitor);
+            if (!o.IsOffAt(now)) { o.Off = false; o.OffUntilUtc = null; } // "for 1 hour" is over
+        }
+        s.MonitorOptions.RemoveAll(o => o.IsEmpty);
+        (s.Fallback, s.FallbackMonitor) = CleanFallback(s.Fallback, s.FallbackMonitor);
+        if (s.KeepMainMonitor != null) CleanRef(s.KeepMainMonitor);
+        else s.KeepMainStopped = false;
         s.RunMode = RunModes.Normalize(s.RunMode);
+    }
+
+    /// <summary>A known fallback mode with its monitor (only kept for <see cref="FallbackModes.Monitor"/>).</summary>
+    private static (string? mode, MonitorRef? monitor) CleanFallback(string? mode, MonitorRef? monitor)
+    {
+        mode = FallbackModes.Normalize(mode, monitor);
+        if (mode != FallbackModes.Monitor) return (mode, null);
+        CleanRef(monitor!);
+        return (mode, monitor);
     }
 
     private static void CleanRef(MonitorRef m)
