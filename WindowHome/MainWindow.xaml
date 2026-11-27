@@ -1,0 +1,163 @@
+<ui:FluentWindow x:Class="WindowHome.MainWindow"
+                 xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+                 Title="WindowHome"
+                 Width="760" Height="1000" MinWidth="600" MinHeight="560"
+                 WindowStartupLocation="Manual"
+                 ExtendsContentIntoTitleBar="True"
+                 WindowBackdropType="Mica"
+                 WindowCornerPreference="Round"
+                 Icon="pack://application:,,,/app.ico">
+    <ui:FluentWindow.Resources>
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,22,0,8" />
+        </Style>
+        <Style x:Key="Secondary" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+    </ui:FluentWindow.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <ui:TitleBar Grid.Row="0" Title="WindowHome" ShowMaximize="False" />
+
+        <ScrollViewer x:Name="PageScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="24,4,24,24">
+
+                <TextBlock FontSize="14" TextWrapping="Wrap"
+                           Text="Opens each app's windows on the monitor you actually use that app on. It learns by noticing which monitor you work with each app on." />
+
+                <!-- Toggles -->
+                <ui:Card Margin="0,16,0,0" Padding="16,8">
+                    <StackPanel>
+                        <Grid Margin="0,6">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="Enabled" FontSize="14" />
+                                <TextBlock Style="{StaticResource Secondary}" Text="Move new windows to their app's monitor." />
+                            </StackPanel>
+                            <ui:ToggleSwitch x:Name="EnabledToggle" Grid.Column="1" Click="EnabledToggle_Click" />
+                        </Grid>
+                        <Separator Margin="0,4" />
+                        <Grid Margin="0,6">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="Learn automatically" FontSize="14" />
+                                <TextBlock Style="{StaticResource Secondary}" Text="When you use an app on a monitor for a few seconds, that becomes its home. Only the window you're using counts." />
+                            </StackPanel>
+                            <ui:ToggleSwitch x:Name="LearnToggle" Grid.Column="1" Click="LearnToggle_Click" />
+                        </Grid>
+                        <Separator Margin="0,4" />
+                        <Grid Margin="0,6">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="Start with Windows" FontSize="14" />
+                                <TextBlock Style="{StaticResource Secondary}" Text="Runs quietly in the tray when you sign in." />
+                            </StackPanel>
+                            <ui:ToggleSwitch x:Name="StartupToggle" Grid.Column="1" Click="StartupToggle_Click" />
+                        </Grid>
+                        <Separator Margin="0,4" />
+                        <Grid Margin="0,6">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBlock Text="Apps it hasn't learned yet:" FontSize="14" VerticalAlignment="Center" />
+                            <ComboBox x:Name="UnknownCombo" Grid.Column="1" MinWidth="260" SelectionChanged="UnknownCombo_SelectionChanged">
+                                <ComboBoxItem Content="Open on main monitor" />
+                                <ComboBoxItem Content="Leave where Windows puts them" />
+                            </ComboBox>
+                        </Grid>
+                    </StackPanel>
+                </ui:Card>
+
+                <TextBlock x:Name="LastActionText" Style="{StaticResource Secondary}" Margin="2,10,0,0" />
+
+                <!-- Monitors -->
+                <TextBlock Style="{StaticResource SectionHeader}" Text="Your monitors" />
+                <ItemsControl x:Name="MonitorsList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <ui:Card Margin="0,0,0,6" Padding="14,10">
+                                <StackPanel Orientation="Horizontal">
+                                    <ui:SymbolIcon Symbol="Desktop24" FontSize="22" Margin="0,0,14,0" VerticalAlignment="Center" />
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Label}" FontSize="14" />
+                                        <TextBlock Text="{Binding Details}" Style="{StaticResource Secondary}" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </ui:Card>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- Learned apps -->
+                <TextBlock Style="{StaticResource SectionHeader}" Text="Apps and where they open" />
+                <ui:Card Padding="0">
+                    <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <Grid Margin="16,10,16,6">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" /><ColumnDefinition Width="220" /><ColumnDefinition Width="100" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="App" FontWeight="SemiBold" />
+                            <TextBlock Grid.Column="1" Text="Opens on" FontWeight="SemiBold" />
+                            <TextBlock Grid.Column="2" Text="Source" FontWeight="SemiBold" />
+                        </Grid>
+                        <Grid Grid.Row="1">
+                            <ui:ListView x:Name="AppsList" MinHeight="120" Margin="4,0,4,4" SelectionMode="Single"
+                                      HorizontalContentAlignment="Stretch"
+                                      PreviewMouseWheel="AppsList_PreviewMouseWheel"
+                                      RequestBringIntoView="AppsList_RequestBringIntoView"
+                                      SelectionChanged="AppsList_SelectionChanged">
+                                <ui:ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="8,4">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" /><ColumnDefinition Width="220" /><ColumnDefinition Width="100" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{Binding Detail}" Style="{StaticResource Secondary}" TextTrimming="CharacterEllipsis" />
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="1" Text="{Binding OpensOn}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Grid.Column="2" Text="{Binding Source}" VerticalAlignment="Center" Style="{StaticResource Secondary}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ui:ListView.ItemTemplate>
+                            </ui:ListView>
+                            <TextBlock x:Name="EmptyText" Style="{StaticResource Secondary}" Margin="20,16" FontSize="13"
+                                       Text="Nothing learned yet. Just use your apps; after a few seconds on a monitor, an app shows up here." />
+                        </Grid>
+                    </Grid>
+                </ui:Card>
+
+                <!-- Selected app -->
+                <ui:Card x:Name="SelectionPanel" Margin="0,8,0,0" Padding="16,12" IsEnabled="False">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Open it on:" VerticalAlignment="Center" Margin="0,0,10,0" />
+                        <ComboBox x:Name="TargetCombo" Grid.Column="1" MinWidth="200" />
+                        <ui:Button Grid.Column="2" Content="Change monitor" Appearance="Primary" Margin="10,0,0,0" Click="ChangeMonitor_Click" />
+                        <ui:Button Grid.Column="3" Content="Forget" Margin="8,0,0,0" Click="Forget_Click" />
+                    </Grid>
+                </ui:Card>
+                <TextBlock x:Name="SelectionHint" Style="{StaticResource Secondary}" Margin="2,6,0,0"
+                           Text="Select an app above to change its monitor or forget it. Changing it pins it, so learning won't change it." />
+
+                <StackPanel Orientation="Horizontal" Margin="0,20,0,0">
+                    <ui:Button Content="Forget all…" Click="ForgetAll_Click" />
+                    <ui:Button Content="Open log" Margin="8,0,0,0" Click="OpenLog_Click" />
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</ui:FluentWindow>
