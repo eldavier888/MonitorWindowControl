@@ -4,6 +4,12 @@ WindowHome opens each app's windows on the monitor you actually use that app on.
 It sits in the system tray, watches for new windows, and moves each one to its app's "home" monitor.
 It learns homes by itself: when you use an app on a monitor for a few seconds, that monitor becomes the app's home.
 
+<p align="center">
+  <img src="docs/screenshot.png" alt="WindowHome window: toggles, the three connected monitors by model name, and a list of apps with the monitor each one opens on" width="560">
+</p>
+
+**[⬇ Download WindowHome.exe](../../releases/latest)** (Windows 10/11, single file, no install)
+
 ## Why
 
 With several displays, Windows often opens new windows on the wrong one. Think of a TV behind you that you
