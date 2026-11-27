@@ -2,9 +2,9 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace WindowHome;
+namespace MonitorWindowControl;
 
-/// <summary>Win32 declarations used by WindowHome.</summary>
+/// <summary>Win32 declarations used by Monitor Window Control.</summary>
 public static class Native
 {
     // ---------- WinEvent hook ----------

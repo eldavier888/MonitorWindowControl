@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 
-namespace WindowHome;
+namespace MonitorWindowControl;
 
 /// <summary>One connected display, identified by its device name (e.g. \\.\DISPLAY2).</summary>
 public sealed class MonitorInfo

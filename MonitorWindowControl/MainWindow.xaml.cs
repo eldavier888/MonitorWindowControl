@@ -9,7 +9,7 @@ using System.Windows.Controls;
 using Wpf.Ui.Appearance;
 using Wpf.Ui.Controls;
 
-namespace WindowHome;
+namespace MonitorWindowControl;
 
 public sealed record AppRow(string Key, string Name, string Detail, string OpensOn, string Source);
 
@@ -154,7 +154,7 @@ public partial class MainWindow : FluentWindow
         var box = new Wpf.Ui.Controls.MessageBox
         {
             Title = "Forget all apps?",
-            Content = $"WindowHome will forget where all {_engine.Settings.Apps.Count} apps open, including the ones you set yourself. It will start learning again from scratch.",
+            Content = $"Monitor Window Control will forget where all {_engine.Settings.Apps.Count} apps open, including the ones you set yourself. It will start learning again from scratch.",
             PrimaryButtonText = "Forget all",
             CloseButtonText = "Cancel",
         };

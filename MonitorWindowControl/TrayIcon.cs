@@ -3,7 +3,7 @@ using System.Drawing;
 using System.Reflection;
 using System.Windows.Forms;
 
-namespace WindowHome;
+namespace MonitorWindowControl;
 
 /// <summary>Notification-area icon: double-click opens; menu has Open, Enabled, Exit.</summary>
 internal sealed class TrayIcon : IDisposable
@@ -30,7 +30,7 @@ internal sealed class TrayIcon : IDisposable
         _icon = new NotifyIcon
         {
             Icon = _iconImage ?? SystemIcons.Application,
-            Text = "WindowHome",
+            Text = "Monitor Window Control",
             ContextMenuStrip = _menu,
             Visible = true,
         };
@@ -44,7 +44,7 @@ internal sealed class TrayIcon : IDisposable
     {
         bool on = _engine.Settings.Enabled;
         _enabledItem.Checked = on;
-        _icon.Text = on ? "WindowHome" : "WindowHome (paused)";
+        _icon.Text = on ? "Monitor Window Control" : "Monitor Window Control (paused)";
     }
 
     public void ShowBalloon(string title, string text) => _icon.ShowBalloonTip(4000, title, text, ToolTipIcon.None);

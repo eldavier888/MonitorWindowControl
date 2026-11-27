@@ -5,15 +5,34 @@ using System.Linq;
 using System.Text.Json;
 using Microsoft.Win32;
 
-namespace WindowHome;
+namespace MonitorWindowControl;
 
 public static class Paths
 {
     public static string Dir { get; } =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WindowHome");
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MonitorWindowControl");
     public static string SettingsFile => Path.Combine(Dir, "settings.json");
-    public static string LogFile => Path.Combine(Dir, "windowhome.log");
+    public static string LogFile => Path.Combine(Dir, "monitorwindowcontrol.log");
     public static string LegacyIni => Path.Combine(AppContext.BaseDirectory, "WindowHome.ini");
+
+    /// <summary>Settings folder used before the app was renamed from "WindowHome".</summary>
+    public static string OldDir =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WindowHome");
+
+    /// <summary>First start under the new name: carry over settings and log from the old folder.</summary>
+    public static void MigrateFromOldName()
+    {
+        try
+        {
+            if (Directory.Exists(Dir) || !File.Exists(Path.Combine(OldDir, "settings.json"))) return;
+            Directory.CreateDirectory(Dir);
+            File.Copy(Path.Combine(OldDir, "settings.json"), SettingsFile);
+            string oldLog = Path.Combine(OldDir, "windowhome.log");
+            if (File.Exists(oldLog)) File.Copy(oldLog, LogFile);
+            Log.Write($"Carried over settings from {OldDir} (the app used to be called WindowHome).");
+        }
+        catch { /* not critical: worst case it starts fresh */ }
+    }
 }
 
 /// <summary>Where one app should open.</summary>
@@ -117,7 +136,7 @@ public static class Log
 public static class StartupManager
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string ValueName = "WindowHome";
+    private const string ValueName = "MonitorWindowControl";
 
     private static string Command => $"\"{Environment.ProcessPath}\" --tray";
 
@@ -134,13 +153,22 @@ public static class StartupManager
         else k.DeleteValue(ValueName, false);
     }
 
-    /// <summary>If the exe was moved, point the Run entry at the new location.</summary>
+    /// <summary>If the exe was moved or renamed, point the Run entry at the new location.</summary>
     public static void RefreshPathIfEnabled()
     {
         try
         {
             using var k = Registry.CurrentUser.OpenSubKey(RunKey, true);
-            if (k?.GetValue(ValueName) is string current && current != Command) k.SetValue(ValueName, Command);
+            if (k == null) return;
+            // Entry written by this app under its old name ("WindowHome.exe --tray"): replace it with the new one.
+            // (Only that exact kind of entry, so an old AutoHotkey autostart is never touched.)
+            if (k.GetValue("WindowHome") is string old
+                && old.Contains("WindowHome.exe", StringComparison.OrdinalIgnoreCase) && old.EndsWith("--tray"))
+            {
+                k.DeleteValue("WindowHome", false);
+                k.SetValue(ValueName, Command);
+            }
+            if (k.GetValue(ValueName) is string current && current != Command) k.SetValue(ValueName, Command);
         }
         catch { }
     }

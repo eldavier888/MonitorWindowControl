@@ -5,12 +5,12 @@ using System.Windows;
 using System.Windows.Threading;
 using Wpf.Ui.Appearance;
 
-namespace WindowHome;
+namespace MonitorWindowControl;
 
 public partial class App : Application
 {
-    private const string MutexName = @"Local\WindowHome.SingleInstance";
-    private const string ShowEventName = @"Local\WindowHome.ShowWindow";
+    private const string MutexName = @"Local\MonitorWindowControl.SingleInstance";
+    private const string ShowEventName = @"Local\MonitorWindowControl.ShowWindow";
 
     private Mutex? _mutex;
     private EventWaitHandle? _showEvent;
@@ -55,7 +55,7 @@ public partial class App : Application
 
         bool fromAutostart = e.Args.Any(a => string.Equals(a, "--tray", StringComparison.OrdinalIgnoreCase));
         if (firstRun) ShowMainWindow();
-        else if (!fromAutostart) _tray.ShowBalloon("WindowHome is running", "It's in the tray. Double-click the icon to open it.");
+        else if (!fromAutostart) _tray.ShowBalloon("Monitor Window Control is running", "It's in the tray. Double-click the icon to open it.");
     }
 
     private void OnUnhandled(object sender, DispatcherUnhandledExceptionEventArgs e)

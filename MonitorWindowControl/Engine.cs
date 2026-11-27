@@ -4,7 +4,7 @@ using System.Linq;
 using System.Windows.Threading;
 using Microsoft.Win32;
 
-namespace WindowHome;
+namespace MonitorWindowControl;
 
 /// <summary>
 /// Watches for new app windows, moves them to their home monitor, and learns homes
@@ -70,6 +70,7 @@ public sealed class Engine : IDisposable
     /// <summary>Loads settings, imports the old .ini on first run, installs the hook. Returns true on first run.</summary>
     public bool Start()
     {
+        Paths.MigrateFromOldName();
         Settings = SettingsStore.Load(out bool existed);
         RefreshMonitors();
         if (!existed)
@@ -88,7 +89,7 @@ public sealed class Engine : IDisposable
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         _learnTimer.Start();
         _started = true;
-        Log.Write($"WindowHome started (enabled={Settings.Enabled}, learn={Settings.LearnAutomatically}, " +
+        Log.Write($"Monitor Window Control started (enabled={Settings.Enabled}, learn={Settings.LearnAutomatically}, " +
                   $"unknown apps={(Settings.MoveUnknownToMain ? "main monitor" : "leave")}, admin={_selfElevated}).");
         return !existed;
     }
@@ -241,7 +242,7 @@ public sealed class Engine : IDisposable
         if (WindowMover.IsFullscreen(hwnd, current)) { Log.Write($"Skipped {app.Key} \"{title}\": fullscreen."); return; }
         if (!_selfElevated && WindowInfo.IsProcessElevated(WindowInfo.GetPid(hwnd)))
         {
-            Log.Write($"Skipped {app.Key} \"{title}\": it runs as administrator, so Windows doesn't allow WindowHome to move it.");
+            Log.Write($"Skipped {app.Key} \"{title}\": it runs as administrator, so Windows doesn't allow Monitor Window Control to move it.");
             return;
         }
         if (Native.IsHungAppWindow(hwnd)) { Log.Write($"Skipped {app.Key} \"{title}\": not responding."); return; }
@@ -405,7 +406,7 @@ public sealed class Engine : IDisposable
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         if (_hook != IntPtr.Zero) { Native.UnhookWinEvent(_hook); _hook = IntPtr.Zero; }
         _pending.Clear(); _handled.Clear();
-        if (_started) { Save(); Log.Write("WindowHome stopped."); }
+        if (_started) { Save(); Log.Write("Monitor Window Control stopped."); }
     }
 }
 

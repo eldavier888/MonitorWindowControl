@@ -4,7 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 
-namespace WindowHome;
+namespace MonitorWindowControl;
 
 /// <summary>Who an app is: exe name, or window title for Store apps.</summary>
 public sealed record AppIdentity(string Key, string DisplayName, bool IsStoreApp);
