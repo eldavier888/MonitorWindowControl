@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Unit tests for the engine and settings. They compile the same shared files as the helper (no WPF), and run on a
+    made-up list of monitors (see FakeMonitorSource), so they need no real monitors and never touch your own settings.
+    Run them with:  dotnet test MonitorWindowControl.Tests
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>MonitorWindowControl.Tests</RootNamespace>
+    <!-- Shared files use platform APIs; this is Windows-only anyway. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\MonitorWindowControl\Native.cs" Link="Shared\Native.cs" />
+    <Compile Include="..\MonitorWindowControl\Monitors.cs" Link="Shared\Monitors.cs" />
+    <Compile Include="..\MonitorWindowControl\WindowInfo.cs" Link="Shared\WindowInfo.cs" />
+    <Compile Include="..\MonitorWindowControl\Storage.cs" Link="Shared\Storage.cs" />
+    <Compile Include="..\MonitorWindowControl\Engine.cs" Link="Shared\Engine.cs" />
+    <Compile Include="..\MonitorWindowControl\Engine.Rules.cs" Link="Shared\Engine.Rules.cs" />
+    <Compile Include="..\MonitorWindowControl\Host.cs" Link="Shared\Host.cs" />
+    <Compile Include="..\MonitorWindowControl\Policy.cs" Link="Shared\Policy.cs" />
+    <Compile Include="..\MonitorWindowControl\CrashReports.cs" Link="Shared\CrashReports.cs" />
+  </ItemGroup>
+
+</Project>

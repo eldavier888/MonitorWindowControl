@@ -66,7 +66,7 @@ public static class Uninstaller
         content.Children.Add(keep);
         content.Children.Add(new TextBlock
         {
-            TextWrapping = TextWrapping.Wrap, Margin = new Thickness(28, 2, 0, 0), FontSize = 12, Opacity = 0.8,
+            TextWrapping = TextWrapping.Wrap, Margin = new Thickness(28, 2, 0, 0), FontSize = 12 * ThemeSupport.TextScale, Opacity = 0.8,
             Text = "If you use it again later, your apps and monitor names are still there. Clear this to delete them too.",
         });
         var box = new Wpf.Ui.Controls.MessageBox

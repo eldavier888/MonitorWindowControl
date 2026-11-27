@@ -1,0 +1,47 @@
+# Builds Monitor Window Control on every push and pull request: the NativeAOT helper, then the settings app (which
+# packs the helper inside), runs the unit tests, and uploads MonitorWindowControl.exe with its SHA256.
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Unit tests
+        shell: pwsh
+        run: dotnet test MonitorWindowControl.Tests -c Release --logger "console;verbosity=normal"
+
+      # build.ps1 finds the Visual Studio C++ tools (the image has them) for the helper's native linker.
+      - name: Build helper and app
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: SHA256
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash publish/MonitorWindowControl.exe -Algorithm SHA256).Hash
+          "$hash  MonitorWindowControl.exe" | Set-Content -Encoding ascii publish/MonitorWindowControl.exe.sha256
+          "SHA256: $hash" >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MonitorWindowControl
+          path: |
+            publish/MonitorWindowControl.exe
+            publish/MonitorWindowControl.exe.sha256
+          if-no-files-found: error

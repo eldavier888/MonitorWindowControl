@@ -1,0 +1,19 @@
+<Project>
+
+  <!--
+    One version for everything: the settings app, the helper and the tests. Change it here only.
+    app.manifest can't take a property, so the build stops with a clear message if its version doesn't match.
+  -->
+  <PropertyGroup>
+    <Version>1.5.0</Version>
+    <Company>Monitor Window Control</Company>
+    <Copyright>MIT licence</Copyright>
+  </PropertyGroup>
+
+  <Target Name="CheckManifestVersion" BeforeTargets="BeforeBuild"
+          Condition="'$(ApplicationManifest)' != '' And Exists('$(MSBuildProjectDirectory)\$(ApplicationManifest)')">
+    <Error Condition="!$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\$(ApplicationManifest)').Contains('version=&quot;$(Version).0&quot; name=&quot;MonitorWindowControl.app&quot;'))"
+           Text="app.manifest says another version than Directory.Build.props ($(Version)). Set assemblyIdentity version=&quot;$(Version).0&quot; in app.manifest." />
+  </Target>
+
+</Project>

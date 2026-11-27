@@ -55,6 +55,7 @@ public partial class MainWindow
         _crashReport = CrashReports.List().FirstOrDefault();
         HelperReportButton.Visibility = _crashReport == null ? Visibility.Collapsed : Visibility.Visible;
         if (_app.HelperProblem != null) HelperDownBar.Message = _app.HelperProblem;
+        Announcer.Announce(this, HelperDownBar.Title);
     }
 
     /// <summary>When the window opens: say once that the app or the helper stopped unexpectedly since last time.</summary>
@@ -181,7 +182,7 @@ public partial class MainWindow
         void Line(string text, double top = 0, bool secondary = false)
         {
             var block = new System.Windows.Controls.TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, top, 0, 0) };
-            if (secondary) { block.Foreground = (System.Windows.Media.Brush)FindResource("TextFillColorSecondaryBrush"); block.FontSize = 12; }
+            if (secondary) { block.Foreground = (System.Windows.Media.Brush)FindResource("TextFillColorSecondaryBrush"); block.FontSize = 12 * ThemeSupport.TextScale; }
             content.Children.Add(block);
         }
         Line($"{file} has {SettingsTransfer.Summary(imported)}.");
@@ -271,7 +272,7 @@ public partial class MainWindow
         content.Children.Add(new System.Windows.Controls.TextBlock
         {
             Text = "Nothing is sent: you choose where to save it, and who to give it to.", TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 12, 0, 0), FontSize = 12, Foreground = (System.Windows.Media.Brush)FindResource("TextFillColorSecondaryBrush"),
+            Margin = new Thickness(0, 12, 0, 0), FontSize = 12 * ThemeSupport.TextScale, Foreground = (System.Windows.Media.Brush)FindResource("TextFillColorSecondaryBrush"),
         });
         var box = new Wpf.Ui.Controls.MessageBox { Title = "Save diagnostics", Content = content, PrimaryButtonText = "Save…", CloseButtonText = "Cancel" };
         if (await box.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary) return;

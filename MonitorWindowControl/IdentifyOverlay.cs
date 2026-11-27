@@ -76,21 +76,27 @@ public static class IdentifyOverlay
 
     private static UIElement LabelContent(MonitorInfo m)
     {
+        // In a contrast theme the label takes the theme's own colours; otherwise white on a dark glass box.
+        bool contrast = SystemParameters.HighContrast;
+        Brush main = contrast ? SystemColors.WindowTextBrush : Brushes.White;
+        Brush second = contrast ? SystemColors.WindowTextBrush : Brushes.Gainsboro;
         var text = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
         text.Children.Add(new TextBlock
         {
             Text = m.Number is int n ? n.ToString() : m.Name, FontSize = 120, FontWeight = FontWeights.SemiBold,
-            Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center,
+            Foreground = main, HorizontalAlignment = HorizontalAlignment.Center,
         });
         if (m.Number != null)
-            text.Children.Add(new TextBlock { Text = m.Name, FontSize = 36, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center });
+            text.Children.Add(new TextBlock { Text = m.Name, FontSize = 36, Foreground = main, HorizontalAlignment = HorizontalAlignment.Center });
         if (!string.Equals(m.FriendlyName, m.Name, StringComparison.CurrentCultureIgnoreCase) && !m.Name.EndsWith(m.FriendlyName, StringComparison.CurrentCulture))
-            text.Children.Add(new TextBlock { Text = m.FriendlyName, FontSize = 22, Foreground = Brushes.Gainsboro, HorizontalAlignment = HorizontalAlignment.Center });
+            text.Children.Add(new TextBlock { Text = m.FriendlyName, FontSize = 22, Foreground = second, HorizontalAlignment = HorizontalAlignment.Center });
         if (m.IsPrimary)
-            text.Children.Add(new TextBlock { Text = "Main monitor", FontSize = 22, Foreground = Brushes.Gainsboro, HorizontalAlignment = HorizontalAlignment.Center });
+            text.Children.Add(new TextBlock { Text = "Main monitor", FontSize = 22, Foreground = second, HorizontalAlignment = HorizontalAlignment.Center });
         return new Border
         {
-            Background = new SolidColorBrush(Color.FromArgb(0xC8, 0x20, 0x20, 0x20)),
+            Background = contrast ? SystemColors.WindowBrush : new SolidColorBrush(Color.FromArgb(0xC8, 0x20, 0x20, 0x20)),
+            BorderBrush = contrast ? SystemColors.WindowTextBrush : null,
+            BorderThickness = new Thickness(contrast ? 3 : 0),
             CornerRadius = new CornerRadius(16),
             Padding = new Thickness(24),
             Child = new Viewbox { Child = text, Stretch = Stretch.Uniform },

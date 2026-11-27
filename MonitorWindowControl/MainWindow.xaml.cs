@@ -101,7 +101,7 @@ public partial class MainWindow : FluentWindow
         _app = app;
         _link = new PlacerLink(engine);
         InitializeComponent();
-        SystemThemeWatcher.Watch(this, WindowBackdropType.Mica, true);
+        ThemeSupport.Follow(this); // light/dark, contrast themes, transparency effects and text size, live
         _engine.Changed += Refresh;
         // While this window is open, keep the "open now" apps current (apps get opened and closed),
         // and pick up what the helper learned meanwhile.
@@ -753,7 +753,13 @@ public partial class MainWindow : FluentWindow
 
     private void AppsList_RequestBringIntoView(object sender, RequestBringIntoViewEventArgs e) => Page_RequestBringIntoView(sender, e);
 
-    private void SearchBox_TextChanged(object sender, TextChangedEventArgs e) => RefreshAppList(background: false);
+    private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        RefreshAppList(background: false);
+        // Say how many apps the search found (Narrator reads it without leaving the search box).
+        int n = (AppsList.ItemsSource as List<AppRow>)?.Count ?? 0;
+        Announcer.Announce(this, n == 0 ? "No apps found" : n == 1 ? "1 app" : $"{n} apps");
+    }
 
     private void AppsList_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
@@ -767,7 +773,12 @@ public partial class MainWindow : FluentWindow
         if (!_updating) UpdateSelectionPanel();
     }
 
-    private void EnabledToggle_Click(object sender, RoutedEventArgs e) => _engine.SetEnabled(EnabledToggle.IsChecked == true);
+    private void EnabledToggle_Click(object sender, RoutedEventArgs e)
+    {
+        bool on = EnabledToggle.IsChecked == true;
+        _engine.SetEnabled(on);
+        Announcer.Announce(this, on ? "Moving new windows again" : "Paused: new windows aren't moved");
+    }
 
     private void LearnToggle_Click(object sender, RoutedEventArgs e) => _engine.SetLearn(LearnToggle.IsChecked == true);
 
@@ -847,6 +858,7 @@ public partial class MainWindow : FluentWindow
         PauseInfoBar.Title = title;
         PauseInfoBar.Message = message;
         PauseInfoBar.IsOpen = title.Length > 0;
+        if (title.Length > 0) Announcer.Announce(this, title);
         System.Windows.Automation.AutomationProperties.SetName(PauseInfoBar, title.Length > 0 ? $"{title}. {message}" : "Status");
     }
 
@@ -886,6 +898,8 @@ public partial class MainWindow : FluentWindow
                 break;
             default: return;
         }
+        Announcer.Announce(this, choice is MonitorInfo target ? $"Saved: {row.Name} opens on {target.Name}"
+                                 : never ? $"Saved: {row.Name} is never moved" : $"Saved: {row.Name}");
         if (!never && fallback is { KeepSaved: false })
             _engine.SetAppFallback(row.Key, fallback.Mode, fallback.Monitor);
         if (!saved && !never) _engine.SetAppPlacement(row.Key, place, wait, correct);
@@ -1001,7 +1015,7 @@ public partial class MainWindow : FluentWindow
                          "for example \"2 · TV\". If another monitor already has that number, it moves to this one. These only apply inside Monitor Window Control: " +
                          "Windows keeps its own display numbers, which apps can't change.", 14);
         note.Foreground = (System.Windows.Media.Brush)FindResource("TextFillColorSecondaryBrush");
-        note.FontSize = 12;
+        note.FontSize = 12 * ThemeSupport.TextScale;
         content.Children.Add(note);
 
         var box = new Wpf.Ui.Controls.MessageBox
@@ -1030,6 +1044,7 @@ public partial class MainWindow : FluentWindow
         if (await box.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
         ShortcutManager.Delete(rule); // its launch shortcut goes too
         _engine.Forget(row.Key);
+        Announcer.Announce(this, $"Forgot {row.Name}");
         AppsList.Focus();
     }
 
@@ -1047,6 +1062,7 @@ public partial class MainWindow : FluentWindow
         if (result != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
         foreach (var rule in _engine.Settings.Apps.ToList()) ShortcutManager.Delete(rule);
         _engine.ForgetAll();
+        Announcer.Announce(this, "Forgot all apps");
     }
 
     // ------------------------------------------------------------------ Recent activity, tidy up, keyboard shortcuts

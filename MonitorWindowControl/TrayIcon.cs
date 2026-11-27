@@ -24,7 +24,9 @@ internal sealed class TrayIcon : IDisposable
     private readonly ToolStripMenuItem _gatherItem;
     private readonly ToolStripMenuItem _monitorsItem;
     private readonly ToolStripMenuItem _groupsItem;
-    private readonly Icon? _iconImage;
+    private readonly Icon? _iconImage;     // the full-colour app icon (contrast themes)
+    private Icon? _themedIcon;             // drawn for a light or dark taskbar
+    private string _iconState = "";
     private readonly Font _boldFont;
     private readonly Action<string, string> _openApp;
     private readonly Action<Engine.UndoOutcome> _undone;
@@ -81,7 +83,7 @@ internal sealed class TrayIcon : IDisposable
 
         _icon = new NotifyIcon
         {
-            Icon = _iconImage ?? SystemIcons.Application,
+            Icon = CurrentIcon(),
             Text = "Monitor Window Control",
             ContextMenuStrip = _menu,
             Visible = true,
@@ -90,10 +92,41 @@ internal sealed class TrayIcon : IDisposable
         _icon.BalloonTipClicked += (_, _) => UndoFromBalloon();
         _icon.BalloonTipClosed += (_, _) => _balloonActivity = null;
 
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnPreferenceChanged; // light/dark taskbar, contrast theme
         _engine.Changed += Update;
         _engine.Notice += ShowBalloon;
         _engine.ActivityNotice += ShowActivity;
         Update();
+    }
+
+    /// <summary>
+    /// The icon to show: one drawn for the taskbar's light or dark mode (Settings → Personalization → Colors), or the
+    /// full-colour app icon in a contrast theme. Made again only when one of those changes.
+    /// </summary>
+    private Icon CurrentIcon()
+    {
+        bool contrast = SystemInformation.HighContrast;
+        bool light = ThemeSupport.TaskbarLight;
+        string state = contrast ? "contrast" : light ? "light" : "dark";
+        if (state == _iconState && (_themedIcon != null || contrast)) return contrast ? _iconImage ?? SystemIcons.Application : _themedIcon!;
+        _iconState = state;
+        _themedIcon = null; // (the one shown now is disposed once it's replaced: see OnPreferenceChanged)
+        if (contrast) return _iconImage ?? SystemIcons.Application;
+        try { _themedIcon = TrayIconArt.Create(light, SystemInformation.SmallIconSize.Width); }
+        catch (Exception) { return _iconImage ?? SystemIcons.Application; }
+        return _themedIcon;
+    }
+
+    /// <summary>Windows changed a setting (WM_SETTINGCHANGE): the taskbar's mode or a contrast theme may be new.</summary>
+    private void OnPreferenceChanged(object? sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category is not (Microsoft.Win32.UserPreferenceCategory.General or Microsoft.Win32.UserPreferenceCategory.Color
+                               or Microsoft.Win32.UserPreferenceCategory.Accessibility or Microsoft.Win32.UserPreferenceCategory.VisualStyle)) return;
+        var previous = _icon.Icon;
+        var next = CurrentIcon();
+        if (ReferenceEquals(previous, next)) return;
+        _icon.Icon = next;
+        if (!ReferenceEquals(previous, _iconImage) && !ReferenceEquals(previous, SystemIcons.Application)) previous?.Dispose();
     }
 
     private void Update()
@@ -284,6 +317,7 @@ internal sealed class TrayIcon : IDisposable
 
     public void Dispose()
     {
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnPreferenceChanged;
         _engine.Changed -= Update;
         _engine.Notice -= ShowBalloon;
         _engine.ActivityNotice -= ShowActivity;
@@ -291,6 +325,7 @@ internal sealed class TrayIcon : IDisposable
         _icon.Dispose();
         _menu.Dispose();
         _iconImage?.Dispose();
+        _themedIcon?.Dispose();
         _appImage?.Dispose();
         _boldFont.Dispose();
     }

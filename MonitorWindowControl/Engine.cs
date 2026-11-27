@@ -51,6 +51,7 @@ public sealed partial class Engine : IDisposable
     public static readonly TimeSpan OffForAnHour = TimeSpan.FromHours(1);
 
     private readonly IEngineHost _host;
+    private readonly IMonitorSource _monitorSource;
     private readonly int _ownPid = Environment.ProcessId;
     private readonly bool _selfElevated;
     private readonly Native.WinEventDelegate _hookProc; // keep a reference so the GC can't collect it
@@ -286,9 +287,12 @@ public sealed partial class Engine : IDisposable
     /// <summary>True while a game or presentation runs and "Pause while a game or presentation is running" is on.</summary>
     public bool IsPausedForGame => IsActive ? _gamePaused : GameOrPresentationRunning();
 
-    public Engine(IEngineHost host)
+    /// <param name="host">Timers, keyboard shortcuts and posting to the engine's thread.</param>
+    /// <param name="monitors">Where monitors are read from: Windows itself unless a test gives a made-up list.</param>
+    public Engine(IEngineHost host, IMonitorSource? monitors = null)
     {
         _host = host;
+        _monitorSource = monitors ?? SystemMonitorSource.Instance;
         _hookProc = OnWinEvent;
         _selfElevated = WindowInfo.IsCurrentProcessElevated();
         _placeTimer = host.CreateTimer(100, ProcessPending);
@@ -572,7 +576,7 @@ public sealed partial class Engine : IDisposable
         // Placements in progress are now stale, and new windows wait until Windows has settled (see HoldIfChanging).
         _lastDisplayEventUtc = DateTime.UtcNow;
         _topologyGeneration++;
-        MonitorService.ClearIdentityCache(); // another monitor may be on a port now
+        _monitorSource.ClearIdentityCache(); // another monitor may be on a port now
         OnSessionChanged();                  // Remote Desktop replaces the monitors: notice it here too
         RefreshMonitors();
         _displayTimer.Stop();
@@ -605,7 +609,7 @@ public sealed partial class Engine : IDisposable
     {
         var wasClosed = _monitors.Where(m => m.IsSwitchedOff || m.OnlyChosenApps)
                                  .Select(m => m.DeviceName).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var list = MonitorService.Enumerate();
+        var list = _monitorSource.Enumerate();
         _monitors = list;
         var now = DateTime.UtcNow;
         var nextExpiry = DateTime.MaxValue;
@@ -877,7 +881,7 @@ public sealed partial class Engine : IDisposable
 
     private MonitorInfo? MonitorOfWindow(IntPtr hwnd)
     {
-        string? dev = MonitorService.DeviceOfWindow(hwnd);
+        string? dev = _monitorSource.DeviceOfWindow(hwnd);
         var m = MonitorByDevice(dev);
         if (m == null && dev != null) { RefreshMonitors(); m = MonitorByDevice(dev); }
         return m;
@@ -949,7 +953,7 @@ public sealed partial class Engine : IDisposable
         if (now - _lastCursorMoveUtc < TimeSpan.FromSeconds(MouseIdleSeconds)
             || p.Pointer.X != _lastCursor.X || p.Pointer.Y != _lastCursor.Y) return;
         IntPtr fg = Native.GetForegroundWindow();
-        if (fg != IntPtr.Zero && fg != hwnd) p.FocusDevice = MonitorService.DeviceOfWindow(fg);
+        if (fg != IntPtr.Zero && fg != hwnd) p.FocusDevice = _monitorSource.DeviceOfWindow(fg);
     }
 
     /// <summary>
@@ -1129,7 +1133,7 @@ public sealed partial class Engine : IDisposable
     /// own that Windows opened on a switched-off monitor: it goes back there when that monitor is switched on again.
     /// <c>Plain</c> is the reason in plain words, for Recent activity.
     /// </summary>
-    private (MonitorInfo? Target, string Reason, bool Displaced, MonitorRef? ReturnTo, string Plain) ChooseTarget(AppRule? rule,
+    internal (MonitorInfo? Target, string Reason, bool Displaced, MonitorRef? ReturnTo, string Plain) ChooseTarget(AppRule? rule,
         MonitorInfo? current, MonitorInfo? pointer)
     {
         MonitorInfo? target;
@@ -1287,7 +1291,7 @@ public sealed partial class Engine : IDisposable
 
         int generation = _topologyGeneration;
         var was = there ? null : Snap(hwnd, ProcessStartOf(hwnd)); // (for Undo)
-        var result = MovePlaced(hwnd, target, place, there, () => generation == _topologyGeneration);
+        var result = MovePlaced(hwnd, target, place, there, StillCurrent(generation));
         string from = current?.Name ?? "?";
         if (result == WindowMover.Result.Aborted)
         {
@@ -1397,7 +1401,7 @@ public sealed partial class Engine : IDisposable
         bool moved = p.IsDialog
             ? CenterDialog(hwnd, p.Owner, target)
             : MovePlaced(hwnd, target, p.Wanted != null || p.WantMaximized ? new Placement(p.Wanted, p.WantMaximized) : null,
-                         false, () => p.Generation == _topologyGeneration) == WindowMover.Result.Moved;
+                         false, StillCurrent(p.Generation)) == WindowMover.Result.Moved;
         if (!moved) return;
         Log.Write($"{p.AppKey} moved itself back to {current.Name}; moved it to {target.Name} again.");
         KeepChecking(hwnd, p);
@@ -1418,7 +1422,7 @@ public sealed partial class Engine : IDisposable
             bool off = p.WantMaximized ? !Native.IsZoomed(hwnd) && WindowMover.CanMaximize(hwnd)
                 : !Native.IsZoomed(hwnd) && !SameRect(now, p.PlacedRect);
             if (off && MovePlaced(hwnd, target, new Placement(p.Wanted, p.WantMaximized), true,
-                                  () => p.Generation == _topologyGeneration) == WindowMover.Result.Moved)
+                                  StillCurrent(p.Generation)) == WindowMover.Result.Moved)
             {
                 Log.Write($"{p.AppKey} changed its size after opening; put it back {(p.Wanted != null ? "where you last had it" : "maximized")}.");
                 return;
@@ -1521,7 +1525,7 @@ public sealed partial class Engine : IDisposable
         if (_locked) return _gamePaused;
         IntPtr fg = Native.GetForegroundWindow();
         if (fg == IntPtr.Zero || WindowInfo.GetPid(fg) == _ownPid || WindowInfo.IsShellWindow(fg)) return false;
-        return WindowMover.IsFullscreen(fg, MonitorByDevice(MonitorService.DeviceOfWindow(fg)));
+        return WindowMover.IsFullscreen(fg, MonitorByDevice(_monitorSource.DeviceOfWindow(fg)));
     }
 
     /// <summary>Works out whether a game or presentation pauses placing and learning now (and says so when that changes).</summary>
@@ -1595,9 +1599,7 @@ public sealed partial class Engine : IDisposable
         // when only one monitor is connected: then you use apps where they *have* to be, not where you want them.
         // (Temporary monitors don't count.) The same goes for a Remote Desktop session (the remote PC's monitors
         // replace this one's) and for duplicated monitors (a "home" there would really be two monitors).
-        if (_monitors.Count(m => !m.IsTemporary) < 2 || IsRemoteSession || HasDuplicatedMonitors
-            || DateTime.UtcNow - _lastMonitorChangeUtc < TimeSpan.FromSeconds(MonitorSettleSeconds))
-        { ResetStreak(); return; }
+        if (LearningBlockedReason(DateTime.UtcNow) != null) { ResetStreak(); return; }
 
         // "Where I used it last" apps are tracked even with automatic learning off: you asked for it per app.
         if (!Settings.Enabled || (!Settings.LearnAutomatically && !Settings.Apps.Any(a => a.FollowLastUsed)))
@@ -1626,6 +1628,28 @@ public sealed partial class Engine : IDisposable
             Learn(app, mon, fg);
         }
     }
+
+    /// <summary>
+    /// Why nothing may be learned right now, or null when learning may go ahead: only one (permanent) monitor, a Remote
+    /// Desktop session, duplicated monitors, or monitors changed less than 30 seconds ago.
+    /// </summary>
+    internal string? LearningBlockedReason(DateTime now)
+    {
+        if (_monitors.Count(m => !m.IsTemporary) < 2) return "only one monitor";
+        if (IsRemoteSession) return "Remote Desktop session";
+        if (HasDuplicatedMonitors) return "duplicated monitors";
+        if (now - _lastMonitorChangeUtc < TimeSpan.FromSeconds(MonitorSettleSeconds)) return "monitors changed just now";
+        return null;
+    }
+
+    /// <summary>
+    /// For a move started now: true while the monitors are still the ones it was started for (no display change since).
+    /// A move that finds this false stops and is tried again once Windows has settled.
+    /// </summary>
+    internal Func<bool> StillCurrent(int generation) => () => generation == _topologyGeneration;
+
+    /// <summary>Goes up by one on every display change (see <see cref="StillCurrent"/>).</summary>
+    internal int TopologyGeneration => _topologyGeneration;
 
     /// <summary>Notes when the mouse pointer last moved (for "The monitor I'm using", with the keyboard only).</summary>
     private void TrackPointer()
@@ -1879,7 +1903,7 @@ public sealed partial class Engine : IDisposable
 
     private WindowSnap? Snap(IntPtr h, long processStart)
     {
-        var m = MonitorByDevice(MonitorService.DeviceOfWindow(h));
+        var m = MonitorByDevice(_monitorSource.DeviceOfWindow(h));
         if (m == null || !Native.GetWindowRect(h, out var r)) return null;
         return new WindowSnap { Monitor = RefTo(m), MonitorBounds = m.Bounds, Rect = r, Maximized = Native.IsZoomed(h), ProcessStart = processStart };
     }
@@ -1901,7 +1925,7 @@ public sealed partial class Engine : IDisposable
         _displaced[h] = new Displaced
         {
             AppKey = appKey, Home = home, Saved = saved, DroppedRect = r,
-            DroppedDevice = MonitorService.DeviceOfWindow(h) ?? "",
+            DroppedDevice = _monitorSource.DeviceOfWindow(h) ?? "",
             ProcessStart = saved?.ProcessStart ?? ProcessStartOf(h),
         };
     }
@@ -1926,7 +1950,7 @@ public sealed partial class Engine : IDisposable
     {
         if (!_displaced.TryGetValue(h, out var d) || !Native.IsWindow(h) || !Native.GetWindowRect(h, out var r)) return;
         d.DroppedRect = r;
-        d.DroppedDevice = MonitorService.DeviceOfWindow(h) ?? d.DroppedDevice;
+        d.DroppedDevice = _monitorSource.DeviceOfWindow(h) ?? d.DroppedDevice;
     }
 
     /// <summary>
@@ -2016,9 +2040,9 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     private WindowMover.Result PutBack(IntPtr h, WindowSnap? saved, MonitorInfo target, int generation)
     {
-        Func<bool> stillValid = () => generation == _topologyGeneration;
+        var stillValid = StillCurrent(generation);
         bool sameMonitor = saved != null && SameRect(saved.MonitorBounds, target.Bounds);
-        bool onTarget = string.Equals(MonitorService.DeviceOfWindow(h), target.DeviceName, StringComparison.OrdinalIgnoreCase);
+        bool onTarget = string.Equals(_monitorSource.DeviceOfWindow(h), target.DeviceName, StringComparison.OrdinalIgnoreCase);
         if (saved == null || !sameMonitor) return onTarget ? WindowMover.Result.Moved : WindowMover.Move(h, target, stillValid);
         if (!saved.Maximized) return WindowMover.PlaceAt(h, target, saved.Rect, stillValid);
         if (!onTarget)
@@ -2350,7 +2374,7 @@ public sealed partial class Engine : IDisposable
         foreach (var t in TidyPlan(includeMoved))
         {
             var before = Snap(t.Hwnd, ProcessStartOf(t.Hwnd));
-            var result = MovePlaced(t.Hwnd, t.To, PlacementFor(t.Rule, t.To), false, () => generation == _topologyGeneration);
+            var result = MovePlaced(t.Hwnd, t.To, PlacementFor(t.Rule, t.To), false, StillCurrent(generation));
             if (result == WindowMover.Result.Aborted) break; // monitors are changing: stop here
             if (result != WindowMover.Result.Moved) continue;
             _pending.Remove(t.Hwnd); _handled.Add(t.Hwnd); _displaced.Remove(t.Hwnd);
@@ -2393,7 +2417,7 @@ public sealed partial class Engine : IDisposable
             var rule = Settings.Find(app.Key);
             if (rule?.NeverMove == true || !CanMoveNow(h, current) || !WindowInfo.IsOnCurrentDesktop(h)) continue;
             var before = Snap(h, ProcessStartOf(h));
-            var result = MovePlaced(h, target, PlacementFor(rule, target), false, () => generation == _topologyGeneration);
+            var result = MovePlaced(h, target, PlacementFor(rule, target), false, StillCurrent(generation));
             if (result == WindowMover.Result.Aborted) break;
             if (result != WindowMover.Result.Moved) continue;
             _pending.Remove(h); _handled.Add(h); _displaced.Remove(h);
@@ -2447,7 +2471,7 @@ public sealed partial class Engine : IDisposable
             if (target == null || Native.IsHungAppWindow(h) || (!_selfElevated && WindowInfo.IsProcessElevated(WindowInfo.GetPid(h)))) continue;
             bool moved = minimized
                 ? MoveMinimizedOnto(h, wp, target)
-                : WindowMover.Move(h, target, () => generation == _topologyGeneration) == WindowMover.Result.Moved;
+                : WindowMover.Move(h, target, StillCurrent(generation)) == WindowMover.Result.Moved;
             if (!moved) continue;
             _displaced.Remove(h);
             names.Add(app.DisplayName);
@@ -2621,7 +2645,7 @@ public sealed partial class Engine : IDisposable
             if (Native.IsHungAppWindow(fg)) return;
             var before = Snap(fg, ProcessStartOf(fg));
             int generation = _topologyGeneration;
-            var result = MovePlaced(fg, target, PlacementFor(Settings.Find(app.Key), target), false, () => generation == _topologyGeneration);
+            var result = MovePlaced(fg, target, PlacementFor(Settings.Find(app.Key), target), false, StillCurrent(generation));
             if (result != WindowMover.Result.Moved)
             {
                 Log.Write($"Keyboard shortcut: couldn't move {app.Key} to {target.Name}.");

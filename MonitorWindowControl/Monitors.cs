@@ -165,6 +165,33 @@ public sealed class MonitorInfo
     public override string ToString() => Label;
 }
 
+/// <summary>
+/// Where the engine reads monitors from. On a PC that's Windows itself (<see cref="SystemMonitorSource"/>); tests give
+/// the engine a made-up list instead, so renumbering, identical models and monitors coming and going can be tried
+/// without real monitors.
+/// </summary>
+public interface IMonitorSource
+{
+    /// <summary>The connected monitors (primary first), as <see cref="MonitorService.Enumerate"/> returns them.</summary>
+    List<MonitorInfo> Enumerate();
+
+    /// <summary>Forgets cached hardware details (another monitor may be on a port now).</summary>
+    void ClearIdentityCache();
+
+    /// <summary>The device name (\\.\DISPLAY2) of the monitor a window is on, or null.</summary>
+    string? DeviceOfWindow(IntPtr hwnd);
+}
+
+/// <summary>The real monitors, from Windows.</summary>
+public sealed class SystemMonitorSource : IMonitorSource
+{
+    public static readonly SystemMonitorSource Instance = new();
+
+    public List<MonitorInfo> Enumerate() => MonitorService.Enumerate();
+    public void ClearIdentityCache() => MonitorService.ClearIdentityCache();
+    public string? DeviceOfWindow(IntPtr hwnd) => MonitorService.DeviceOfWindow(hwnd);
+}
+
 public static class MonitorService
 {
     // DISPLAYCONFIG_TARGET_DEVICE_NAME_FLAGS: the EDID manufacturer and product code are valid.

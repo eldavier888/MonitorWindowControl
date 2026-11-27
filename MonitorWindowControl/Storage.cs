@@ -11,16 +11,27 @@ namespace MonitorWindowControl;
 
 public static class Paths
 {
-    public static string Dir { get; } =
+    public static string Dir { get; private set; } =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MonitorWindowControl");
     public static string SettingsFile => Path.Combine(Dir, "settings.json");
     public static string LogFile => Path.Combine(Dir, "monitorwindowcontrol.log");
     public static string LegacyIni => Path.Combine(AppContext.BaseDirectory, "WindowHome.ini");
 
     /// <summary>Where the tiny helper is unpacked to (not a folder Windows' "Controlled folder access" protects).</summary>
-    public static string HelperDir { get; } =
+    public static string HelperDir { get; private set; } =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MonitorWindowControl");
     public static string HelperExe => Path.Combine(HelperDir, "MonitorWindowControlHelper.exe");
+
+    /// <summary>
+    /// Tests only: keep settings, the log and the helper's files in this folder (and use a settings lock of their own),
+    /// so a test never reads or changes the settings of the copy you use.
+    /// </summary>
+    internal static void UseFolderForTests(string dir)
+    {
+        Dir = Path.Combine(dir, "settings");
+        HelperDir = Path.Combine(dir, "helper");
+        SettingsStore.LockName = @"Local\MonitorWindowControl.Settings.Tests." + Environment.ProcessId;
+    }
 
     /// <summary>Start menu folder for launch-only shortcuts.</summary>
     public static string ShortcutsDir =>
@@ -696,7 +707,7 @@ internal partial class SettingsJson : JsonSerializerContext { }
 /// </summary>
 public static class SettingsStore
 {
-    private const string LockName = @"Local\MonitorWindowControl.Settings";
+    internal static string LockName = @"Local\MonitorWindowControl.Settings"; // (tests use their own: see Paths.UseFolderForTests)
     private static DateTime _loadedStampUtc;
     /// <summary>Set when settings.json exists but couldn't be read at startup: never overwrite it until it's read.</summary>
     private static bool _notReadYet;
@@ -803,7 +814,7 @@ public static class SettingsStore
         s.Apps.RemoveAll(a => !seen.Add(a.Key));
         foreach (var a in s.Apps)
         {
-            a.DisplayName ??= a.Key;
+            if (string.IsNullOrWhiteSpace(a.DisplayName)) a.DisplayName = a.Key; // (missing, null or empty: show the key)
             a.AllowedMonitors ??= new();
             a.AllowedMonitors.RemoveAll(m => m == null);
             foreach (var m in a.AllowedMonitors) CleanRef(m);
@@ -871,7 +882,7 @@ public static class SettingsStore
             x.Monitors.RemoveAll(m => m == null);
             if (string.IsNullOrWhiteSpace(x.Name)) x.Name = null;
             x.Homes ??= new();
-            x.Homes.RemoveAll(h => h == null || string.IsNullOrWhiteSpace(h.Key) || h.Monitor == null);
+            x.Homes.RemoveAll(h => h == null || string.IsNullOrWhiteSpace(h.Key) || IsEmptyRef(h.Monitor));
             var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             x.Homes.RemoveAll(h => !keys.Add(h.Key));
             foreach (var h in x.Homes) CleanRef(h.Monitor);
@@ -914,6 +925,10 @@ public static class SettingsStore
         CleanRef(monitor!);
         return (mode, monitor);
     }
+
+    /// <summary>True for a missing monitor, or one saved with nothing to find it by (no number, name or hardware).</summary>
+    private static bool IsEmptyRef(MonitorRef? m) =>
+        m == null || (string.IsNullOrWhiteSpace(m.Device) && string.IsNullOrWhiteSpace(m.Name) && (m.Hardware == null || m.Hardware.IsEmpty));
 
     private static void CleanRef(MonitorRef m)
     {

@@ -48,7 +48,7 @@ public partial class MainWindow
     private System.Windows.Controls.TextBlock DialogText(string text, double top = 0, bool secondary = false)
     {
         var block = new System.Windows.Controls.TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, top, 0, 6) };
-        if (secondary) { block.Foreground = (System.Windows.Media.Brush)FindResource("TextFillColorSecondaryBrush"); block.FontSize = 12; }
+        if (secondary) { block.Foreground = (System.Windows.Media.Brush)FindResource("TextFillColorSecondaryBrush"); block.FontSize = 12 * ThemeSupport.TextScale; }
         return block;
     }
 

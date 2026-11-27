@@ -8,7 +8,7 @@ It learns homes by itself: when you use an app on a monitor for a few seconds, t
   <img src="docs/screenshot.png" alt="Monitor Window Control window: toggles, the three connected monitors by model name, and a list of apps with the monitor each one opens on" width="560">
 </p>
 
-**[⬇ Download MonitorWindowControl.exe](../../releases/latest/download/MonitorWindowControl.exe)** (8 MB, Windows 10/11, no install)
+**[⬇ Download MonitorWindowControl.exe](../../releases/latest/download/MonitorWindowControl.exe)** (10 MB, Windows 10/11, no install)
 
 ## Why
 
@@ -38,7 +38,8 @@ which monitor an app's new windows should open on.
    It uses the free [.NET Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) 8 or newer, which
    many PCs already have. If yours doesn't, Windows offers to download it the first time you start the app.
 2. Double-click it and its window opens. When you close the window it keeps working in the tray
-   (look for the blue monitor-with-a-house icon; it may be under the **^** arrow next to the clock).
+   (look for the monitor-with-a-house icon, drawn in white or black to suit your taskbar; it may be under the **^**
+   arrow next to the clock).
    You don't need to set anything: just use your apps, and each one is learned after a few seconds on a monitor.
    The very first time, a short welcome inside the window walks you through three steps, each of which you can skip:
    your monitors (give them numbers and names, with **Identify** to see which is which), apps that belong on a
@@ -264,7 +265,14 @@ shortcuts are never changed. Launch shortcuts work in every mode.
   `HKLM\SOFTWARE\Policies\MonitorWindowControl` (or `HKCU\...`, for one user): `Enabled`, `LearnAutomatically`,
   `AllowMakeMain` (DWORD 0 or 1), `UnknownApps` (`main`, `leave` or `mouse`), `RunMode` (`Tray`, `Helper` or
   `LaunchOnly`), and an `AppRules` key whose value names are apps (`chrome.exe`) and values are `main`, `never` or a model name.
-- Everything works with the keyboard (Tab, arrow keys, Space/Enter) and with Narrator.
+- **Accessibility and your Windows look**: everything works with the keyboard (Tab, arrow keys, Space/Enter), and a
+  clear outline shows which card has the keyboard focus. Narrator reads every control, and says what just happened
+  without moving the focus: "Saved", "Forgot Chrome", "Paused", a message at the top of the page, or how many apps a
+  search found. The window follows Windows as you change it, without restarting: light or dark mode, contrast themes
+  (Aquatic, Desert, Dusk, Night sky: the theme's own colours, with no see-through background), a solid background when
+  *Transparency effects* are off (Settings → Personalization → Colors), and bigger text with Settings → Accessibility →
+  *Text size* (up to 225 %). The tray icon is drawn in white on a dark taskbar and in black on a light one, and the
+  **Identify** labels use your contrast theme's colours.
 
 How it decides, for each new window (about 0.4 s after it appears, because apps often reposition themselves
 right after opening):
@@ -324,8 +332,16 @@ You only need this if you change the code.
 .\build.ps1
 ```
 
-The result is `publish\MonitorWindowControl.exe` (about 8 MB, needs the .NET Desktop Runtime 8 or newer;
+The result is `publish\MonitorWindowControl.exe` (about 10 MB, needs the .NET Desktop Runtime 8 or newer;
 the 3 MB native helper is packed inside it).
+
+The version number is set once, in `Directory.Build.props` (`app.manifest` must say the same; the build tells you if it doesn't).
+
+Tests: `dotnet test MonitorWindowControl.Tests` runs the unit tests. They try out, on made-up monitors, how a saved
+monitor is found again (Windows renumbering, identical models, monitors without a model name), where an app goes while
+its monitor is off, when learning waits, monitors changing in the middle of a move, and how damaged or old settings
+files are repaired. They never touch your own settings or windows. On GitHub, every push builds both programs, runs the
+tests and offers `MonitorWindowControl.exe` with its SHA256 checksum to download (`.github\workflows\build.yml`).
 
 Project layout:
 
@@ -339,6 +355,8 @@ Project layout:
 - `MonitorWindowControl\Storage.cs`: settings file (shared safely by the app and the helper), log, Start with Windows,
   import of the old `.ini`
 - `MonitorWindowControl\MainWindow.xaml`, `TrayIcon.cs`, `App.xaml.cs`: the window, tray icon, app startup and run modes
+- `MonitorWindowControl\ThemeSupport.cs`, `TrayIconArt.cs`: following light/dark mode, contrast themes, transparency
+  effects and text size; Narrator announcements; the light and dark tray icon
 - `MonitorWindowControl\HelperManager.cs`, `ShortcutManager.cs`: unpacking/starting the helper; launch shortcuts
 - `MonitorWindowControlHelper\`: the tiny native helper (`Program.cs`: background and `--launch` modes;
   `NativeHost.cs`: its Windows message loop)
@@ -346,10 +364,11 @@ Project layout:
 - `MonitorWindowControl\SettingsTransfer.cs`, `Diagnostics.cs`, `Uninstaller.cs`: import with monitor matching,
   Save diagnostics, Installed apps entry and Remove from this PC
 - `MonitorWindowControl\DisplayTopology.cs`: Disconnect from Windows and Connect (QueryDisplayConfig / SetDisplayConfig)
+- `MonitorWindowControl.Tests\`: unit tests (xUnit) on made-up monitors (`FakeMonitorSource`, through `IMonitorSource`)
 - `policies\`: Group Policy templates (ADMX and ADML)
 - `MonitorWindowControl\tools\make-icon.ps1`: regenerates `app.ico`
 
-Tech: C# / .NET 8, WPF with the WPF-UI library (Windows 11 Fluent look, Mica, follows light/dark mode),
+Tech: C# / .NET 8, WPF with the WPF-UI library (Windows 11 Fluent look, Mica, follows light/dark mode and contrast themes),
 PerMonitorV2 DPI awareness. The helper: C# compiled with .NET 10 NativeAOT (no .NET needed to run it).
 
 ## Privacy

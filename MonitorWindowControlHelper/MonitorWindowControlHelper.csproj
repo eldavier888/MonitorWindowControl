@@ -24,7 +24,7 @@
     <RootNamespace>MonitorWindowControl</RootNamespace>
     <ApplicationManifest>..\MonitorWindowControl\app.manifest</ApplicationManifest>
     <ApplicationIcon>..\MonitorWindowControl\app.ico</ApplicationIcon>
-    <Version>1.5.0</Version>
+    <!-- The version is set once, in Directory.Build.props. -->
     <Product>Monitor Window Control</Product>
     <AssemblyTitle>Monitor Window Control helper</AssemblyTitle>
     <!-- Shared files use platform APIs; this is Windows-only anyway. -->

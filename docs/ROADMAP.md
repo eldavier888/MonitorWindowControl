@@ -400,6 +400,8 @@ Store or other infrastructure). Effort: S / M / L / XL.
 
 ### 26. Accessibility and theme conformance (high contrast, text size, announcements)
 
+**Status:** partly built: the automated Axe.Windows check isn't added (WPF UI tests need a desktop session the hosted build doesn't have); contrast themes, Narrator and 225 % text still need checking by hand.
+
 *Polish · effort M*
 
 **Problem.** The README claims keyboard and Narrator support, but nothing verifies it. A Settings-style app must render correctly in contrast themes, at 225% text size, and with transparency effects off, and must announce changes. Light and dark mode is already live (SystemThemeWatcher), but the tray icon and high contrast aren't handled.
@@ -411,6 +413,8 @@ Store or other infrastructure). Effort: S / M / L / XL.
 **Risks.** WPF-UI controls only partly honour contrast themes, so some styles may need overrides. Test manually with Narrator and each contrast theme.
 
 ### 27. Engine unit tests and a GitHub Actions build
+
+**Status:** partly built: the integration test that creates a real window and checks Classify isn't added, and app.manifest's version is checked against Directory.Build.props rather than generated from it.
 
 *Quality · effort L*
 

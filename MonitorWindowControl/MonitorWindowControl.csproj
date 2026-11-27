@@ -13,7 +13,7 @@
     <RootNamespace>MonitorWindowControl</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.5.0</Version>
+    <!-- The version is set once, in Directory.Build.props. -->
     <!-- Uses the installed .NET Desktop Runtime (8, or any newer one: 9, 10, ...) instead of bundling
          its own copy, which keeps the exe at ~6 MB instead of ~144 MB. -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
