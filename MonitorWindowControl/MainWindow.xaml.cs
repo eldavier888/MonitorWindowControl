@@ -69,7 +69,7 @@ public partial class MainWindow : FluentWindow
         PageScroller.SizeChanged += (_, _) => FitAppsList();
         // A closed drop-down must never change its value when you scroll the page over it (WPF does that by default
         // for a focused ComboBox — scrolling past "How it runs" could switch the mode).
-        foreach (var combo in new[] { RunModeCombo, UnknownCombo, TargetCombo })
+        foreach (var combo in new[] { RunModeCombo, UnknownCombo, RemoteCombo, TargetCombo })
             combo.PreviewMouseWheel += (s, e) =>
             {
                 if (((ComboBox)s).IsDropDownOpen) return;
@@ -105,7 +105,7 @@ public partial class MainWindow : FluentWindow
             foreach (var item in NavList.Items.OfType<Wpf.Ui.Controls.ListViewItem>())
                 if (item.Content is StackPanel sp && sp.Children.Count > 1) sp.Children[1].Visibility = NavIdentity.Visibility;
             // Small window: keep the drop-downs compact so the descriptions beside them stay readable.
-            foreach (var combo in new[] { RunModeCombo, UnknownCombo })
+            foreach (var combo in new[] { RunModeCombo, UnknownCombo, RemoteCombo })
             {
                 combo.MinWidth = compact ? 150 : 250;
                 combo.MaxWidth = compact ? 210 : double.PositiveInfinity;
@@ -202,6 +202,8 @@ public partial class MainWindow : FluentWindow
             LearnToggle.IsChecked = s.LearnAutomatically;
             StartupToggle.IsChecked = s.StartWithWindows == true;
             UnknownCombo.SelectedIndex = s.MoveUnknownToMain ? 0 : 1;
+            RemoteCombo.SelectedIndex = s.PauseDuringRemoteDesktop ? 0 : 1;
+            UpdatePauseInfo();
 
             RunModeCombo.SelectedItem = RunModeCombo.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == s.RunMode);
             bool launchOnly = s.RunMode == RunModes.LaunchOnly;
@@ -216,7 +218,7 @@ public partial class MainWindow : FluentWindow
             BackgroundStatusText.Text = _app.BackgroundStatus();
             StartupToggle.IsEnabled = !launchOnly;
             ExitCard.Visibility = s.RunMode == RunModes.Tray ? Visibility.Visible : Visibility.Collapsed;
-            NavStatus.Text = !s.Enabled ? "Paused" : s.RunMode switch
+            NavStatus.Text = !s.Enabled ? "Paused" : _engine.IsPausedForRemoteDesktop ? "Paused during Remote Desktop" : s.RunMode switch
             {
                 RunModes.Helper => "Running as a background helper",
                 RunModes.LaunchOnly => "Launch shortcuts only",
@@ -236,7 +238,7 @@ public partial class MainWindow : FluentWindow
             RecentPanel.Visibility = string.IsNullOrEmpty(_engine.LastAction) ? Visibility.Collapsed : Visibility.Visible;
 
             // Rebuild the monitor cards only when monitors (or their names) actually changed.
-            string sig = string.Join("|", _engine.Monitors.Select(m => $"{m.DeviceName}={m.Label}/{m.Details}"));
+            string sig = string.Join("|", _engine.Monitors.Select(m => $"{m.DeviceName}={m.Label}/{m.Details}/{m.ShowTemporaryOption}{m.IsTemporary}"));
             if (sig != _monitorSig) { _monitorSig = sig; MonitorsList.ItemsSource = _engine.Monitors.ToList(); }
         }
         finally { _updating = false; }
@@ -491,6 +493,40 @@ public partial class MainWindow : FluentWindow
     {
         if (_updating || UnknownCombo.SelectedIndex < 0) return;
         _engine.SetMoveUnknownToMain(UnknownCombo.SelectedIndex == 0);
+    }
+
+    private void RemoteCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_updating || RemoteCombo.SelectedIndex < 0) return;
+        _engine.SetPauseDuringRemoteDesktop(RemoteCombo.SelectedIndex == 0);
+    }
+
+    /// <summary>The bar at the top of General: says when something outside the app pauses it.</summary>
+    private void UpdatePauseInfo()
+    {
+        string title = "", message = "";
+        if (Engine.IsRemoteSession)
+        {
+            title = _engine.IsPausedForRemoteDesktop ? "Paused: Remote Desktop session" : "Remote Desktop session";
+            message = _engine.IsPausedForRemoteDesktop
+                ? "Windows aren't moved and nothing is learned until you're back on this PC's own monitors."
+                : "Windows are still moved, as you chose, but nothing is learned until you're back on this PC's own monitors.";
+        }
+        else if (_engine.HasDuplicatedMonitors)
+        {
+            title = "Learning paused: monitors are duplicated";
+            message = "Some monitors show the same picture, so apps aren't learned until they're extended again (Windows key + P).";
+        }
+        PauseInfoBar.Title = title;
+        PauseInfoBar.Message = message;
+        PauseInfoBar.IsOpen = title.Length > 0;
+        System.Windows.Automation.AutomationProperties.SetName(PauseInfoBar, title.Length > 0 ? $"{title}. {message}" : "Status");
+    }
+
+    private void AppsCanOpenHere_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ToggleSwitch toggle || toggle.DataContext is not MonitorInfo m) return;
+        _engine.SetMonitorTemporary(m, toggle.IsChecked != true);
     }
 
     private void ChangeMonitor_Click(object sender, RoutedEventArgs e)

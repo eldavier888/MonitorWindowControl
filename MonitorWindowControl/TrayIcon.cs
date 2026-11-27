@@ -46,7 +46,8 @@ internal sealed class TrayIcon : IDisposable
     {
         bool on = _engine.Settings.Enabled;
         _enabledItem.Checked = on;
-        _icon.Text = on ? "Monitor Window Control" : "Monitor Window Control (paused)";
+        _icon.Text = !on ? "Monitor Window Control (paused)"
+            : _engine.IsPausedForRemoteDesktop ? "Monitor Window Control (paused: Remote Desktop)" : "Monitor Window Control";
     }
 
     public void ShowBalloon(string title, string text) => _icon.ShowBalloonTip(4000, title, text, ToolTipIcon.None);

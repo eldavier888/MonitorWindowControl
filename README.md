@@ -74,9 +74,24 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
   same monitor for two checks in a row (about 4 seconds), that monitor becomes its home. Windows sitting in the
   background never teach it anything. Nothing is learned while only one monitor is connected, or for 30 seconds
   after monitors change (a TV switched on, waking from sleep, a game changing resolution), because then you use
-  apps where they *have* to be, not where you want them. Installers and uninstallers aren't remembered.
+  apps where they *have* to be, not where you want them. Changing the refresh rate or turning HDR on or off doesn't
+  count as monitors changing. Nothing is learned while monitors are duplicated (Windows key + P → *Duplicate*) or
+  during a Remote Desktop session either; the General page says so at the top. Installers and uninstallers aren't remembered.
+- **While connected with Remote Desktop**: when you use this PC from another one, the other PC's monitors replace
+  yours, so by default Monitor Window Control pauses until you're back (**Pause**). Choose **Keep moving windows**
+  if you want windows placed anyway; learning still pauses.
 - **Apps it hasn't learned yet**: open them on the main monitor, or leave them where Windows puts them.
-- **Your monitors**: shows each monitor by its model name; "(main)" is the one set as main display in Windows.
+- **Your monitors**: shows each monitor by its model name, its size and how it's connected (HDMI, DisplayPort,
+  USB-C, wireless…); "(main)" is the one set as main display in Windows. Monitors are recognised by the monitor
+  itself (its serial number and the port it's plugged into), not by Windows' display number, so homes, names and
+  numbers stay with the right monitor when Windows renumbers them. Two monitors of the same model say how they're
+  told apart. Settings from older versions keep working and are updated by themselves.
+  - **Duplicated monitors** (showing the same picture) appear as one card, for example "Main + TV (duplicated)".
+    Apps set to either monitor open there.
+  - **Apps can open here** (wireless, virtual and USB monitors): wireless (Miracast) and virtual monitors come and go,
+    so they're temporary by default: apps aren't learned on them, and they're never used instead of a monitor that's
+    off. Turn the switch on for one you use all the time; turn it off for a USB (DisplayLink) monitor you only
+    connect now and then. Apps you set to open on a temporary monitor still do.
   - **Name & number**: give a monitor your own name ("TV") and number ("3"). It then shows as "3 · TV"
     everywhere in the app, and your numbers set the order. (Windows keeps its own display numbers; apps can't change those.)
   - **Make main**: makes that monitor the main display in Windows itself, the same as Settings → Display →
@@ -98,13 +113,17 @@ right after opening):
 
 | The app is... | Monitor Window Control... |
 |---|---|
-| learned or set by you | moves it to that monitor. If that monitor is off/disconnected, to the main monitor for now |
+| learned or set by you | moves it to that monitor. If that monitor is off/disconnected, to the main monitor for now (never to a temporary monitor) |
 | set to "Where I used it last" | moves it to the monitor (of the ones you ticked) where you last used it. If that one is off, to another one you ticked; if you never used it yet, leaves it |
 | set to "Never move" | leaves it alone |
 | not known yet | moves it to the main monitor (or leaves it, per your setting) |
 
 Each window is handled once. If you move it somewhere else afterwards, Monitor Window Control won't move it back.
 (It only corrects an app that jumps straight back to where it opened, within the first second.)
+While monitors are changing (a TV switching on, waking from sleep, a dock reconnecting), new windows wait until
+things have settled, up to 3 seconds, so they don't land on a monitor that's going away. A moved window is
+centred on its monitor with its visible edges (not its invisible resize borders) fully on screen, and it's sized
+again after it adapts to a monitor with a different scale (for example a TV at 200 % next to a monitor at 100 %).
 Minimized, fullscreen and not-responding windows are skipped. Store apps (Calculator…) all run inside one
 Windows process, so they're told apart by window title and shown as "(Store app)". Web apps installed from a
 browser (Netflix, Disney+, Prime Video, Crave… in Edge or Chrome) are recognised as their own apps and shown as "Web app".
@@ -143,7 +162,8 @@ Project layout:
 
 - `MonitorWindowControl\Engine.cs`: detects new windows, decides and moves them, and does the learning
   (shared by the app and the helper; runs on whatever `IEngineHost` the program provides, see `Host.cs`)
-- `MonitorWindowControl\Monitors.cs`: lists monitors and their model names
+- `MonitorWindowControl\Monitors.cs`: lists monitors, their model names and hardware identity (EDID serial,
+  port), duplicated monitors, and finds a saved monitor again (`MonitorMatcher`)
 - `MonitorWindowControl\WindowInfo.cs`: decides which windows are real app windows, which app they belong to,
   and how to start that app again
 - `MonitorWindowControl\Storage.cs`: settings file (shared safely by the app and the helper), log, Start with Windows,

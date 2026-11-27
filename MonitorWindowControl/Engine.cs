@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace MonitorWindowControl;
@@ -22,6 +23,9 @@ public sealed class Engine : IDisposable
     private const int LearnIntervalMs = 2000;
     private const int LearnChecksNeeded = 2;  // 2 consecutive checks ≈ 4 s
     private const int MonitorSettleSeconds = 30; // no learning this long after monitors change
+    private const int HoldAfterChangeMs = 2000;  // new windows wait this long after the last display change…
+    private const int MaxHoldMs = 3000;          // …but never longer than this in all
+    private const int MaxRequeues = 2;           // a move cut short by a display change is tried again this often
 
     private readonly IEngineHost _host;
     private readonly int _ownPid = Environment.ProcessId;
@@ -37,7 +41,12 @@ public sealed class Engine : IDisposable
     private readonly IEngineTimer _displayTimer;
     private List<MonitorInfo> _monitors = new();
     private string _monitorSignature = "";
+    private string _layoutSignature = "";
     private DateTime _lastMonitorChangeUtc = DateTime.MinValue;
+    private DateTime _lastDisplayEventUtc = DateTime.MinValue; // last "display changed" from Windows or a new layout
+    private int _topologyGeneration;                            // +1 on every display change: moves started before are stale
+    private bool _identityBackfillDue;                          // save hardware identity into older saved monitors
+    private bool? _wasRemote;
 
     private string? _streakKey, _streakDevice;
     private string? _learnedKey, _learnedDevice; // what the current streak already taught (don't redo it every 2 s)
@@ -47,6 +56,23 @@ public sealed class Engine : IDisposable
     public AppSettings Settings { get; private set; } = new();
     public IReadOnlyList<MonitorInfo> Monitors => _monitors;
     public MonitorInfo? MainMonitor => _monitors.FirstOrDefault(m => m.IsPrimary) ?? _monitors.FirstOrDefault();
+
+    /// <summary>
+    /// Where windows go when their monitor isn't connected, and where apps it hasn't learned yet open: the main
+    /// monitor, unless that one is temporary (then the first monitor that isn't).
+    /// </summary>
+    public MonitorInfo? FallbackMonitor =>
+        MainMonitor is { IsTemporary: false } main ? main : _monitors.FirstOrDefault(m => !m.IsTemporary) ?? MainMonitor;
+
+    /// <summary>True while this PC is used through Remote Desktop (its own monitors are replaced by the remote ones).</summary>
+    public static bool IsRemoteSession => Native.GetSystemMetrics(Native.SM_REMOTESESSION) != 0;
+
+    /// <summary>True while windows aren't moved because of a Remote Desktop session (see <see cref="AppSettings.PauseDuringRemoteDesktop"/>).</summary>
+    public bool IsPausedForRemoteDesktop => Settings.PauseDuringRemoteDesktop && IsRemoteSession;
+
+    /// <summary>True while Windows duplicates a display on several monitors (learning is paused then).</summary>
+    public bool HasDuplicatedMonitors => _monitors.Any(m => m.IsDuplicated);
+
     public string LastAction { get; private set; } = "";
 
     /// <summary>True while this engine watches for new windows (see <see cref="Activate"/>).</summary>
@@ -74,6 +100,11 @@ public sealed class Engine : IDisposable
         public string TargetDevice = "";
         public string AppKey = "";
         public string FromDevice = "";   // the monitor it was on before we moved it
+        public int Generation;           // _topologyGeneration when it was placed (Verify only)
+        public DateTime HeldSinceUtc;    // when it was first held back because monitors were changing
+        public bool WasHeld;
+        public int Requeues;             // times a move was cut short by a display change
+        public Native.RECT PlacedRect;   // where the move left it (Verify only)
     }
 
     public Engine(IEngineHost host)
@@ -84,7 +115,12 @@ public sealed class Engine : IDisposable
         _placeTimer = host.CreateTimer(100, ProcessPending);
         _learnTimer = host.CreateTimer(LearnIntervalMs, LearnTick);
         IEngineTimer? display = null;
-        display = host.CreateTimer(1500, () => { display!.Stop(); RefreshMonitors(); });
+        display = host.CreateTimer(1500, () =>
+        {
+            display!.Stop();
+            RefreshMonitors();
+            if (_identityBackfillDue) BackfillIdentity();
+        });
         _displayTimer = display;
     }
 
@@ -106,6 +142,9 @@ public sealed class Engine : IDisposable
         if (importLegacy) ForgetLearnedOneOffApps();
         Log.Write($"{who} started (mode={Settings.RunMode}, enabled={Settings.Enabled}, learn={Settings.LearnAutomatically}, " +
                   $"unknown apps={(Settings.MoveUnknownToMain ? "main monitor" : "leave")}, admin={_selfElevated}).");
+        BackfillIdentity();
+        _wasRemote = IsRemoteSession;
+        if (_wasRemote == true) Log.Write(RemoteMessage(true));
         return !existed;
     }
 
@@ -191,10 +230,37 @@ public sealed class Engine : IDisposable
     public void OnDisplaySettingsChanged()
     {
         if (_disposed) return;
+        // Placements in progress are now stale, and new windows wait until Windows has settled (see HoldIfChanging).
+        _lastDisplayEventUtc = DateTime.UtcNow;
+        _topologyGeneration++;
+        MonitorService.ClearIdentityCache(); // another monitor may be on a port now
+        OnSessionChanged();                  // Remote Desktop replaces the monitors: notice it here too
         RefreshMonitors();
         _displayTimer.Stop();
         _displayTimer.Start();
     }
+
+    /// <summary>
+    /// The host calls this when the session changes (Remote Desktop connected or disconnected, console reconnected).
+    /// While connected through Remote Desktop, nothing is learned and (unless you chose otherwise) nothing is moved.
+    /// </summary>
+    public void OnSessionChanged()
+    {
+        if (_disposed) return;
+        bool remote = IsRemoteSession;
+        if (_wasRemote == remote) return;
+        _wasRemote = remote;
+        _lastMonitorChangeUtc = DateTime.UtcNow; // back on this PC's monitors: let them settle before learning again
+        ResetStreak();
+        if (_started) Log.Write(RemoteMessage(remote));
+        Changed?.Invoke();
+    }
+
+    private string RemoteMessage(bool remote) => remote
+        ? (Settings.PauseDuringRemoteDesktop
+            ? "Remote Desktop session: not moving windows or learning until you're back on this PC."
+            : "Remote Desktop session: still moving windows (you chose that), but not learning.")
+        : "Back on this PC's own monitors (Remote Desktop ended): moving windows again.";
 
     public void RefreshMonitors()
     {
@@ -202,48 +268,153 @@ public sealed class Engine : IDisposable
         _monitors = list;
         foreach (var m in list)
         {
-            var custom = Settings.MonitorNicknames.FirstOrDefault(n => Matches(n.Monitor, m));
-            m.Nickname = string.IsNullOrWhiteSpace(custom?.Nickname) ? null : custom!.Nickname;
-            m.Number = custom?.Number;
+            foreach (var t in m.Targets)
+            {
+                var custom = Settings.MonitorNicknames.FirstOrDefault(n => MatchesTarget(n.Monitor, t));
+                t.Nickname = string.IsNullOrWhiteSpace(custom?.Nickname) ? null : custom!.Nickname;
+                t.Number = custom?.Number;
+            }
+            // A duplicated display is temporary only if every monitor showing it is (casting a copy of the main monitor isn't).
+            m.IsTemporary = m.Targets.All(t => IsTemporaryTarget(t));
         }
         // Your numbers decide the order (numbered first, 1, 2, 3…); otherwise main first, then left to right.
         list = list.OrderBy(m => m.Number ?? int.MaxValue).ThenByDescending(m => m.IsPrimary).ThenBy(m => m.Bounds.Left).ToList();
         _monitors = list;
-        string sig = string.Join("|", list.Select(m => $"{m.DeviceName}={m.Name}{(m.IsPrimary ? "*" : "")}@{m.Bounds}/{m.Work}"));
+        foreach (var m in list) m.IdentityNote = IdentityNote(m);
+
+        string layout = MonitorService.LayoutSignature(list);
+        if (layout != _layoutSignature)
+        {
+            if (_layoutSignature.Length > 0) // (not the first read at startup)
+            {
+                var now = DateTime.UtcNow;
+                _lastMonitorChangeUtc = now;
+                _lastDisplayEventUtc = now;
+                _topologyGeneration++;
+                _identityBackfillDue = true;
+            }
+            _layoutSignature = layout;
+            if (list.FirstOrDefault(m => m.IsDuplicated) is MonitorInfo dup)
+                Log.Write($"Duplicated monitors ({dup.Name}): learning paused while they show the same picture.");
+        }
+
+        // Only refreshing names and notes (and Changed) for a change you can see: names, numbers, temporary, main.
+        string sig = string.Join("|", list.Select(m => $"{m.DeviceName}={m.Name}{(m.IsPrimary ? "*" : "")}{(m.IsTemporary ? "~" : "")}@{m.Bounds}/{m.Work}"));
         if (sig == _monitorSignature) return;
-        if (_monitorSignature.Length > 0) _lastMonitorChangeUtc = DateTime.UtcNow; // (not the first read at startup)
         _monitorSignature = sig;
-        Log.Write("Monitors: " + string.Join(", ", list.Select(m => $"{m.Label} [{m.DeviceName}]")));
+        Log.Write("Monitors: " + string.Join(", ", list.Select(m =>
+            $"{m.Label} [{m.DeviceName}{string.Concat(m.Targets.Select(t => $" {t.Connection} {t.Model} {t.Serial}".TrimEnd()))}" +
+            $"{(m.IsTemporary ? ", temporary" : "")}]")));
         if (_started) Changed?.Invoke();
     }
+
+    /// <summary>"Same model as 1 · Main: told apart by…", for a monitor that shares its model with another one.</summary>
+    private string? IdentityNote(MonitorInfo m)
+    {
+        if (m.IsDuplicated) return null;
+        var t = m.Targets[0];
+        var twin = _monitors.Where(o => !ReferenceEquals(o, m))
+            .FirstOrDefault(o => o.Targets.Any(x => string.IsNullOrEmpty(t.Model) ? SameModelName(x, t) : t.Model == x.Model));
+        if (twin == null) return null;
+        var other = twin.Targets.First(x => string.IsNullOrEmpty(t.Model) ? SameModelName(x, t) : t.Model == x.Model);
+        string how = !string.IsNullOrEmpty(t.Serial) && !string.IsNullOrEmpty(other.Serial) && t.Serial != other.Serial
+            ? "its serial number"
+            : !string.IsNullOrEmpty(t.DevicePath) && !string.IsNullOrEmpty(other.DevicePath) ? "the port it's plugged into"
+            : "Windows' display number";
+        return $"Same model as {twin.Name}: told apart by {how}.";
+    }
+
+    private static bool SameModelName(MonitorTarget a, MonitorTarget b)
+    {
+        static string Model(string n) { int i = n.LastIndexOf(" (DISPLAY", StringComparison.Ordinal); return i > 0 ? n[..i] : n; }
+        return !a.FriendlyName.StartsWith("Display ", StringComparison.Ordinal) && Model(a.FriendlyName) == Model(b.FriendlyName);
+    }
+
+    /// <summary>Is this monitor temporary: your choice for it, else wireless and virtual monitors are.</summary>
+    private bool IsTemporaryTarget(MonitorTarget t) =>
+        Settings.MonitorOptions.FirstOrDefault(o => MatchesTarget(o.Monitor, t))?.Temporary ?? t.IsTemporaryByDefault;
 
     private MonitorInfo? MonitorByDevice(string? device) =>
         device == null ? null : _monitors.FirstOrDefault(m => string.Equals(m.DeviceName, device, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>The connected monitor an app rule points to, or null if it isn't connected.</summary>
-    public MonitorInfo? Resolve(AppRule rule) => FindMonitor(rule.MonitorName, rule.MonitorDevice);
+    public MonitorInfo? Resolve(AppRule rule) => MonitorMatcher.Find(_monitors, rule.MonitorName, rule.MonitorDevice, rule.MonitorHardware);
 
     private bool Matches(MonitorRef r, MonitorInfo m) =>
-        string.Equals(FindMonitor(r.Name, r.Device)?.DeviceName, m.DeviceName, StringComparison.OrdinalIgnoreCase);
+        string.Equals(MonitorMatcher.Find(_monitors, r.Name, r.Device, r.Hardware)?.DeviceName, m.DeviceName, StringComparison.OrdinalIgnoreCase);
+
+    private bool MatchesTarget(MonitorRef r, MonitorTarget t) =>
+        ReferenceEquals(MonitorMatcher.FindTarget(_monitors, r.Name, r.Device, r.Hardware)?.Target, t);
+
+    /// <summary>A saved reference to a connected monitor (device, model name and hardware identity).</summary>
+    private static MonitorRef RefTo(MonitorInfo m) => new() { Device = m.DeviceName, Name = m.FriendlyName, Hardware = m.Hardware };
+
+    /// <summary>A saved reference to one physical monitor (one of a duplicated display's monitors).</summary>
+    private static MonitorRef RefTo(MonitorInfo m, MonitorTarget t) => new() { Device = m.DeviceName, Name = t.FriendlyName, Hardware = t.Hardware };
+
+    /// <summary>Points a rule at a monitor: its device, model name and hardware identity.</summary>
+    private static void SetMonitor(AppRule rule, MonitorInfo? m)
+    {
+        rule.MonitorDevice = m?.DeviceName;
+        rule.MonitorName = m?.FriendlyName;
+        rule.MonitorHardware = m == null ? null : MonitorHardware.Clean(m.Hardware);
+    }
 
     /// <summary>
-    /// Finds a saved monitor among the connected ones. The model name wins: it survives Windows renumbering displays
-    /// (a TV switched on or off). The saved device ("DISPLAY3") is only trusted when no name was saved, when Windows
-    /// couldn't read a model name, or for two identical models; otherwise a monitor that isn't connected stays
-    /// "not connected" instead of being confused with whichever screen now has its number.
+    /// Older versions saved monitors by Windows' display number and model name only. The first time each saved monitor is
+    /// seen connected, add its hardware identity (keeping the old fields, so an older version still finds it), and keep
+    /// the port path current when a cable has moved. Runs at startup and after monitors change, never while placing a window.
     /// </summary>
-    private MonitorInfo? FindMonitor(string? name, string? device)
+    private void BackfillIdentity()
     {
-        var byDevice = MonitorByDevice(device);
-        if (string.IsNullOrEmpty(name)) return byDevice;
-        var byName = _monitors.Where(m => m.FriendlyName == name).ToList();
-        if (byName.Count == 1) return byName[0];
-        if (byDevice == null) return null;
-        if (byName.Count > 1) return byDevice;
-        static bool Generic(string n) => n.StartsWith("Display ", StringComparison.Ordinal);
-        static string Model(string n) { int i = n.LastIndexOf(" (DISPLAY", StringComparison.Ordinal); return i > 0 ? n[..i] : n; }
-        if (Generic(name) || Generic(byDevice.FriendlyName)) return byDevice;          // no model name to go by
-        return Model(byDevice.FriendlyName) == Model(name) ? byDevice : null;          // same model, renumbered
+        _identityBackfillDue = false;
+        if (_monitors.Count == 0 || IsRemoteSession) return; // the remote session's monitors aren't this PC's
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        bool changed = false;
+        foreach (var rule in Settings.Apps)
+        {
+            if (rule.MonitorDevice == null && rule.MonitorName == null) continue;
+            var hw = IdentityToSave(rule.MonitorName, rule.MonitorDevice, rule.MonitorHardware);
+            if (hw == null) continue;
+            rule.MonitorHardware = hw;
+            changed = true;
+        }
+        foreach (var r in Settings.Apps.SelectMany(a => a.AllowedMonitors)
+                     .Concat(Settings.MonitorNicknames.Select(n => n.Monitor))
+                     .Concat(Settings.MonitorOptions.Select(o => o.Monitor)))
+        {
+            var hw = IdentityToSave(r.Name, r.Device, r.Hardware);
+            if (hw == null) continue;
+            r.Hardware = hw;
+            changed = true;
+        }
+        if (!changed) return;
+        Save();
+        Log.Write("Saved the hardware identity of your monitors, so they're recognised even if Windows renumbers them.");
+    }
+
+    /// <summary>
+    /// The hardware identity to save for a saved monitor that is connected now, or null to leave it as it is.
+    /// Only a sure match is saved: the same port, or the same model and serial number (the cable moved). An entry
+    /// with no port or serial saved yet is only filled in when its display number and model name both agree, so a
+    /// guess between two identical monitors is never made permanent.
+    /// </summary>
+    private MonitorHardware? IdentityToSave(string? name, string? device, MonitorHardware? saved)
+    {
+        var hit = MonitorMatcher.FindTarget(_monitors, name, device, saved);
+        if (hit is not { } h || h.Monitor.IsDuplicated) return null;
+        var t = h.Target;
+        bool samePort = !string.IsNullOrEmpty(saved?.DevicePath)
+                        && string.Equals(saved!.DevicePath, t.DevicePath, StringComparison.OrdinalIgnoreCase);
+        bool sameSerial = !string.IsNullOrEmpty(saved?.Serial) && saved!.Serial == t.Serial
+                          && string.Equals(saved.Model, t.Model, StringComparison.OrdinalIgnoreCase);
+        bool nothingSure = string.IsNullOrEmpty(saved?.DevicePath) && string.IsNullOrEmpty(saved?.Serial);
+        bool sameNumberAndName = string.Equals(h.Monitor.DeviceName, device, StringComparison.OrdinalIgnoreCase)
+                                 && (name == null || t.FriendlyName == name);
+        if (!samePort && !sameSerial && !(nothingSure && sameNumberAndName)) return null;
+        var hw = MonitorHardware.Clean(t.Hardware);
+        return hw == null || hw.SameAs(saved) ? null : hw;
     }
 
     /// <summary>For "Where I used it last" apps: is this one of the monitors it may open on?</summary>
@@ -259,7 +430,9 @@ public sealed class Engine : IDisposable
         var m = Resolve(rule);
         if (!rule.FollowLastUsed) return m;
         if (m != null && IsAllowed(rule, m)) return m;           // the monitor you used it on last
-        return rule.AllowedMonitors.Count > 0 ? AllowedConnected(rule).FirstOrDefault() : null; // else another of its monitors
+        if (rule.AllowedMonitors.Count == 0) return null;
+        var others = AllowedConnected(rule);                     // else another of its monitors, a permanent one first
+        return others.FirstOrDefault(o => !o.IsTemporary) ?? others.FirstOrDefault();
     }
 
     private MonitorInfo? MonitorOfWindow(IntPtr hwnd)
@@ -314,8 +487,30 @@ public sealed class Engine : IDisposable
         if (_pending.Count == 0) _placeTimer.Stop();
     }
 
+    /// <summary>
+    /// While monitors are changing (a TV switching on, waking from sleep, a dock reconnecting), new windows wait until
+    /// about 2 s after the last change, 3 s at most, so they aren't placed on a monitor that is about to go away or
+    /// centred on an out-of-date work area. Returns true if the window should wait (its due time is set).
+    /// </summary>
+    private bool HoldIfChanging(Pending p, DateTime now)
+    {
+        var settledAt = _lastDisplayEventUtc.AddMilliseconds(HoldAfterChangeMs);
+        if (now >= settledAt) return false;
+        if (p.HeldSinceUtc == default)
+        {
+            p.HeldSinceUtc = now;
+            p.GiveUp = p.GiveUp.AddMilliseconds(MaxHoldMs); // waiting doesn't count against the window
+        }
+        var limit = p.HeldSinceUtc.AddMilliseconds(MaxHoldMs);
+        if (now >= limit) return false;
+        p.WasHeld = true;
+        p.Due = settledAt < limit ? settledAt : limit;
+        return true;
+    }
+
     private void TryPlace(IntPtr hwnd, Pending p, DateTime now)
     {
+        if (HoldIfChanging(p, now)) return;
         switch (WindowInfo.Classify(hwnd, _ownPid))
         {
             case WindowInfo.Kind.Hidden:
@@ -336,7 +531,7 @@ public sealed class Engine : IDisposable
         _handled.Add(hwnd);
         if (_appWindows.Add(hwnd)) AppWindowsChanged?.Invoke();
         ReloadIfChanged();
-        if (!Settings.Enabled) return;
+        if (!Settings.Enabled || IsPausedForRemoteDesktop) return;
 
         var app = WindowInfo.Identify(hwnd);
         if (app == null) return;
@@ -345,8 +540,23 @@ public sealed class Engine : IDisposable
 
         var rule = Settings.Find(app.Key);
         if (rule != null) rule = RefreshRuleDetails(rule, app, hwnd);
-        try { PlaceNewWindow(hwnd, app, rule, title); }
+        try { PlaceNewWindow(hwnd, app, rule, title, p); }
         finally { WindowHandled?.Invoke(app.Key); }
+    }
+
+    /// <summary>A move was cut short because monitors changed: try the window again once Windows has settled.</summary>
+    private void Requeue(IntPtr hwnd, Pending p, string what)
+    {
+        if (p.Requeues >= MaxRequeues || !Native.IsWindow(hwnd)) { Log.Write($"Gave up on {what}: monitors kept changing."); return; }
+        var now = DateTime.UtcNow;
+        _handled.Remove(hwnd);
+        _pending[hwnd] = new Pending
+        {
+            Due = now.AddMilliseconds(HoldAfterChangeMs), GiveUp = now.AddMilliseconds(GiveUpMs + MaxHoldMs),
+            Requeues = p.Requeues + 1, WasHeld = true, HeldSinceUtc = now,
+        };
+        if (!_placeTimer.IsEnabled) _placeTimer.Start();
+        Log.Write($"Monitors changed while placing {what}; trying again when they've settled.");
     }
 
     /// <summary>
@@ -371,7 +581,7 @@ public sealed class Engine : IDisposable
         return fresh;
     }
 
-    private void PlaceNewWindow(IntPtr hwnd, AppIdentity app, AppRule? rule, string title)
+    private void PlaceNewWindow(IntPtr hwnd, AppIdentity app, AppRule? rule, string title, Pending p)
     {
         MonitorInfo? target;
         string reason;
@@ -383,21 +593,30 @@ public sealed class Engine : IDisposable
             if (target == null && rule.FollowLastUsed && rule.MonitorDevice == null) return; // never used yet: leave it
             if (target == null)
             {
-                target = MainMonitor;
-                reason += $"; its monitor ({rule.MonitorName ?? rule.MonitorDevice}) isn't connected, so main monitor";
+                target = FallbackMonitor;
+                reason += $"; its monitor ({rule.MonitorName ?? rule.MonitorDevice}) isn't connected, so " +
+                          (target?.IsPrimary == true ? "main monitor" : target?.Name);
             }
         }
         else
         {
             if (!Settings.MoveUnknownToMain) return;
-            target = MainMonitor;
-            reason = "new app → main monitor";
+            target = FallbackMonitor;
+            reason = target?.IsPrimary == true ? "new app → main monitor" : $"new app → {target?.Name} (the main monitor is temporary)";
         }
         if (target == null) return;
+        if (p.WasHeld) reason += "; held during a display change";
 
         // The taskbar may have moved or changed size since monitors were last read: use the current work area.
         string targetDevice = target.DeviceName;
+        int before = _topologyGeneration;
         RefreshMonitors();
+        if (_topologyGeneration != before)
+        {
+            // The monitors changed just now (Windows hasn't said so yet): the target may have been renumbered. Wait.
+            Requeue(hwnd, p, $"{app.Key} \"{title}\"");
+            return;
+        }
         target = MonitorByDevice(targetDevice);
         if (target == null) return;
 
@@ -413,17 +632,25 @@ public sealed class Engine : IDisposable
         }
         if (Native.IsHungAppWindow(hwnd)) { Log.Write($"Skipped {app.Key} \"{title}\": not responding."); return; }
 
-        bool ok = WindowMover.MoveTo(hwnd, target);
+        int generation = _topologyGeneration;
+        var result = WindowMover.Move(hwnd, target, () => generation == _topologyGeneration);
         string from = current?.Name ?? "?";
-        if (ok)
+        if (result == WindowMover.Result.Aborted)
+        {
+            Requeue(hwnd, p, $"{app.Key} \"{title}\"");
+            return;
+        }
+        if (result == WindowMover.Result.Moved)
         {
             if (reason.Contains("isn't connected")) _fallbackPlaced.Add(hwnd);
             Note($"Moved {app.DisplayName} from {from} to {target.Name} ({reason}).", $"{app.Key} \"{title}\"");
             // Check once more shortly: some apps restore their saved position after showing.
+            Native.GetWindowRect(hwnd, out var placed);
             _pending[hwnd] = new Pending
             {
                 Verify = true, Due = DateTime.UtcNow.AddMilliseconds(VerifyDelayMs),
                 TargetDevice = target.DeviceName, AppKey = app.Key, FromDevice = current?.DeviceName ?? "",
+                Generation = generation, PlacedRect = placed, Requeues = p.Requeues,
             };
         }
         else
@@ -437,9 +664,25 @@ public sealed class Engine : IDisposable
         _pending.Remove(hwnd);
         if (!Native.IsWindow(hwnd) || !Native.IsWindowVisible(hwnd) || Native.IsIconic(hwnd)) return;
         if ((Native.GetAsyncKeyState(Native.VK_LBUTTON) & 0x8000) != 0) return; // user is dragging: hands off
+        if (p.Generation != _topologyGeneration)
+        {
+            // Monitors changed since it was placed: where it is now says nothing about the app. Place it again once settled.
+            Requeue(hwnd, p, p.AppKey);
+            return;
+        }
         var target = MonitorByDevice(p.TargetDevice);
         var current = MonitorOfWindow(hwnd);
-        if (target == null || current == null || current.DeviceName == target.DeviceName) return;
+        if (target == null || current == null) return;
+        if (current.DeviceName == target.DeviceName)
+        {
+            // Still where we put it. An app that rescaled itself for the monitor's DPI after the move can now stick out
+            // past the edge: pull it back in, but only if it's still where we left it (otherwise you moved it).
+            Native.GetWindowRect(hwnd, out var now);
+            if (Math.Abs(now.Left - p.PlacedRect.Left) <= 1 && Math.Abs(now.Top - p.PlacedRect.Top) <= 1
+                && WindowMover.KeepInside(hwnd, target))
+                Log.Write($"{p.AppKey} changed size after the move; kept it fully on {target.Name}.");
+            return;
+        }
         // Apps that restore their saved position jump back to where they opened. Anywhere else, you moved it: leave it.
         if (!string.Equals(current.DeviceName, p.FromDevice, StringComparison.OrdinalIgnoreCase)) return;
         if (WindowMover.MoveTo(hwnd, target))
@@ -456,11 +699,16 @@ public sealed class Engine : IDisposable
             _fallbackPlaced.RemoveWhere(h => !Native.IsWindow(h));
         }
         ReloadIfChanged(); // pick up changes made in the settings window / by the helper
+        if (_identityBackfillDue && DateTime.UtcNow - _lastDisplayEventUtc > TimeSpan.FromMilliseconds(HoldAfterChangeMs))
+            BackfillIdentity();
         if (!_learning) return;
 
         // Don't learn while monitors are changing (sleep, display driver reset, a game switching resolution…) or
         // when only one monitor is connected: then you use apps where they *have* to be, not where you want them.
-        if (_monitors.Count < 2 || DateTime.UtcNow - _lastMonitorChangeUtc < TimeSpan.FromSeconds(MonitorSettleSeconds))
+        // (Temporary monitors don't count.) The same goes for a Remote Desktop session (the remote PC's monitors
+        // replace this one's) and for duplicated monitors (a "home" there would really be two monitors).
+        if (_monitors.Count(m => !m.IsTemporary) < 2 || IsRemoteSession || HasDuplicatedMonitors
+            || DateTime.UtcNow - _lastMonitorChangeUtc < TimeSpan.FromSeconds(MonitorSettleSeconds))
         { ResetStreak(); return; }
 
         // "Where I used it last" apps are tracked even with automatic learning off: you asked for it per app.
@@ -497,13 +745,15 @@ public sealed class Engine : IDisposable
         var rule = Settings.Find(app.Key);
         if (rule != null) rule = RefreshRuleDetails(rule, app, hwnd);
         // It's on the main monitor only because its own monitor is off: that's not a choice. (Drag it elsewhere and it is.)
-        if (_fallbackPlaced.Contains(hwnd) && mon.DeviceName == MainMonitor?.DeviceName) return;
+        if (_fallbackPlaced.Contains(hwnd) && mon.DeviceName == FallbackMonitor?.DeviceName) return;
         if (rule != null && rule.FollowLastUsed)
         {
             // Remember the last monitor you used it on, if it's one of the monitors you picked for it.
+            // A temporary monitor only counts if you ticked it yourself.
             if (!IsAllowed(rule, mon) || Resolve(rule)?.DeviceName == mon.DeviceName) return;
+            if (mon.IsTemporary && rule.AllowedMonitors.Count == 0) return;
             string? was = rule.MonitorName ?? rule.MonitorDevice;
-            rule.MonitorDevice = mon.DeviceName; rule.MonitorName = mon.FriendlyName; rule.UpdatedUtc = DateTime.UtcNow;
+            SetMonitor(rule, mon); rule.UpdatedUtc = DateTime.UtcNow;
             Save();
             Log.Write($"Last used: {rule.DisplayName} is now on {mon.Name}{(was == null ? "" : $" (was {was})")}, so it opens there next.  [{rule.Key} {mon.DeviceName}]");
             Changed?.Invoke();
@@ -512,11 +762,13 @@ public sealed class Engine : IDisposable
         if (!Settings.LearnAutomatically) return;
         if (rule != null && (rule.Pinned || rule.NeverMove)) return;
         if (rule == null && WindowInfo.IsOneOffApp(app.Key)) return; // setup / uninstall / update programs
+        if (mon.IsTemporary) return; // wireless, virtual…: never an app's home unless you set it
         if (rule != null && Resolve(rule)?.DeviceName == mon.DeviceName)
         {
-            if (rule.MonitorDevice != mon.DeviceName || rule.MonitorName != mon.FriendlyName)
+            if (rule.MonitorDevice != mon.DeviceName || rule.MonitorName != mon.FriendlyName
+                || !mon.Hardware.SameAs(rule.MonitorHardware ?? new MonitorHardware()))
             {   // same screen, Windows just renamed it: keep the record current quietly
-                rule.MonitorDevice = mon.DeviceName; rule.MonitorName = mon.FriendlyName; Save();
+                SetMonitor(rule, mon); Save();
             }
             return;
         }
@@ -526,8 +778,7 @@ public sealed class Engine : IDisposable
         bool keepName = app.Key.StartsWith(WindowInfo.WebAppKeyPrefix, StringComparison.Ordinal)
                         && !string.IsNullOrWhiteSpace(rule.DisplayName) && rule.DisplayName != rule.Key;
         if (!keepName) rule.DisplayName = app.DisplayName;
-        rule.MonitorDevice = mon.DeviceName;
-        rule.MonitorName = mon.FriendlyName;
+        SetMonitor(rule, mon);
         rule.UpdatedUtc = DateTime.UtcNow;
         Save();
         Note(old == null
@@ -587,7 +838,7 @@ public sealed class Engine : IDisposable
         rule.NeverMove = monitor == null;
         rule.FollowLastUsed = false;
         rule.AllowedMonitors.Clear();
-        if (monitor != null) { rule.MonitorDevice = monitor.DeviceName; rule.MonitorName = monitor.FriendlyName; }
+        if (monitor != null) SetMonitor(rule, monitor);
         rule.UpdatedUtc = DateTime.UtcNow;
         Save();
         ResetStreak();
@@ -621,11 +872,11 @@ public sealed class Engine : IDisposable
         rule.Pinned = true;
         rule.NeverMove = false;
         rule.FollowLastUsed = true;
-        rule.AllowedMonitors = allowed.Select(m => new MonitorRef { Device = m.DeviceName, Name = m.FriendlyName }).ToList();
+        rule.AllowedMonitors = allowed.Select(RefTo).ToList();
         // Start from where it is now / was last, if that's allowed; otherwise the first allowed monitor.
         var start = new[] { currentMonitor, Resolve(rule) }.FirstOrDefault(m => m != null && IsAllowed(rule, m))
                     ?? AllowedConnected(rule).FirstOrDefault();
-        rule.MonitorDevice = start?.DeviceName; rule.MonitorName = start?.FriendlyName;
+        SetMonitor(rule, start);
         rule.UpdatedUtc = DateTime.UtcNow;
         Save();
         ResetStreak();
@@ -703,22 +954,54 @@ public sealed class Engine : IDisposable
     {
         using var _lock = SettingsStore.Lock();
         ReloadIfChanged();
+        m = MonitorByDevice(m.DeviceName) ?? m; // the window's copy may be from before the last refresh
         nickname = string.IsNullOrWhiteSpace(nickname) ? null : nickname.Trim();
         string old = m.Name;
-        Settings.MonitorNicknames.RemoveAll(n => Matches(n.Monitor, m));
+        Settings.MonitorNicknames.RemoveAll(n => MatchesTarget(n.Monitor, m.Targets[0]));
         if (number != null)
             foreach (var other in Settings.MonitorNicknames.Where(n => n.Number == number)) other.Number = null;
         Settings.MonitorNicknames.RemoveAll(n => string.IsNullOrWhiteSpace(n.Nickname) && n.Number == null);
         if (nickname != null || number != null)
             Settings.MonitorNicknames.Add(new MonitorNickname
             {
-                Monitor = new MonitorRef { Device = m.DeviceName, Name = m.FriendlyName },
+                Monitor = RefTo(m),
                 Nickname = nickname ?? "", Number = number,
             });
         Save();
         RefreshMonitors();
         var now = _monitors.FirstOrDefault(x => x.DeviceName == m.DeviceName);
         Note($"Monitor {old} is now shown as {now?.Name ?? m.FriendlyName}.", $"[{m.DeviceName}]");
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Marks a monitor as temporary (apps aren't learned there, and it's never used instead of a monitor that's off)
+    /// or as a normal one. Wireless and virtual monitors are temporary until you say otherwise.
+    /// </summary>
+    public void SetMonitorTemporary(MonitorInfo m, bool temporary)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        m = MonitorByDevice(m.DeviceName) ?? m; // the window's copy may be from before the last refresh
+        var t = m.Targets[0];
+        Settings.MonitorOptions.RemoveAll(o => MatchesTarget(o.Monitor, t));
+        if (temporary != t.IsTemporaryByDefault)
+            Settings.MonitorOptions.Add(new MonitorOptions { Monitor = RefTo(m, t), Temporary = temporary });
+        Save();
+        RefreshMonitors();
+        Note(temporary ? $"{m.Name} is a temporary monitor: apps aren't learned there."
+                       : $"{m.Name} is a normal monitor: apps can be learned there.", $"[{m.DeviceName}]");
+        Changed?.Invoke();
+    }
+
+    /// <summary>Whether to stop moving windows while this PC is used through Remote Desktop.</summary>
+    public void SetPauseDuringRemoteDesktop(bool on)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (Settings.PauseDuringRemoteDesktop == on) return;
+        Settings.PauseDuringRemoteDesktop = on; Save();
+        Log.Write("While connected with Remote Desktop: " + (on ? "pause" : "keep moving windows"));
         Changed?.Invoke();
     }
 
@@ -907,29 +1190,173 @@ internal static class WindowMover
                    Native.SMTO_ABORTIFHUNG | Native.SMTO_BLOCK, 500, out _) != IntPtr.Zero;
     }
 
-    /// <summary>Centers the window on the target's work area (size clamped to fit). Keeps it maximized if it was.</summary>
-    public static bool MoveTo(IntPtr hwnd, MonitorInfo target)
+    /// <summary>What a move did.</summary>
+    public enum Result
     {
-        if (!Responds(hwnd)) return false;
-        const uint flags = Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER;
+        /// <summary>The window is on the target monitor now.</summary>
+        Moved,
+        /// <summary>It couldn't be moved (the app doesn't respond, or stayed where it was).</summary>
+        Failed,
+        /// <summary>Monitors changed while moving it; it can be tried again once they've settled.</summary>
+        Aborted,
+    }
+
+    private const uint MoveFlags = Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER;
+    private const int DpiWaitMs = 200;    // how long to wait for an app to rescale for the target's DPI
+    private const int MaxFrameBorder = 64; // larger "invisible borders" are bogus values; ignore them
+
+    /// <summary>Centers the window on the target's work area (size clamped to fit). Keeps it maximized if it was.</summary>
+    public static bool MoveTo(IntPtr hwnd, MonitorInfo target) => Move(hwnd, target, null) == Result.Moved;
+
+    /// <summary>
+    /// Moves the window onto the target monitor, centred on its work area and sized to fit, keeping it maximized if it
+    /// was. Before each step it checks that the monitor is still there as expected (Windows' own monitor list, and
+    /// <paramref name="stillValid"/>): if monitors changed in between, it stops and returns <see cref="Result.Aborted"/>.
+    /// </summary>
+    public static Result Move(IntPtr hwnd, MonitorInfo target, Func<bool>? stillValid)
+    {
+        if (!Responds(hwnd)) return Result.Failed;
+        if (!LiveWorkArea(target, out var wa) || stillValid?.Invoke() == false) return Result.Aborted;
         bool wasMaximized = Native.IsZoomed(hwnd);
         if (wasMaximized) Native.ShowWindow(hwnd, Native.SW_RESTORE);
-
-        var wa = target.Work;
-        if (!Native.GetWindowRect(hwnd, out var r)) return false;
-
-        // Step 1: jump onto the target keeping the size, so the app can rescale for that monitor's DPI.
-        int w = Math.Min(r.Width, wa.Width), h = Math.Min(r.Height, wa.Height);
-        Native.SetWindowPos(hwnd, IntPtr.Zero, wa.Left + (wa.Width - w) / 2, wa.Top + (wa.Height - h) / 2, 0, 0, flags | Native.SWP_NOSIZE);
-
-        // Step 2: with the size it has now, clamp and center.
-        if (Native.GetWindowRect(hwnd, out r))
+        try
         {
-            w = Math.Min(r.Width, wa.Width); h = Math.Min(r.Height, wa.Height);
-            Native.SetWindowPos(hwnd, IntPtr.Zero, wa.Left + (wa.Width - w) / 2, wa.Top + (wa.Height - h) / 2, w, h, flags);
-        }
+            if (!Native.GetWindowRect(hwnd, out var r)) return Result.Failed;
+            uint startDpi = Native.GetDpiForWindow(hwnd), targetDpi = MonitorDpi(target);
 
-        if (wasMaximized) Native.ShowWindow(hwnd, Native.SW_MAXIMIZE);
-        return string.Equals(MonitorService.DeviceOfWindow(hwnd), target.DeviceName, StringComparison.OrdinalIgnoreCase);
+            // Step 1: jump onto the target keeping the size, so the app can rescale for that monitor's DPI.
+            var step1 = Fit(r, Frame(hwnd, r), wa);
+            Native.SetWindowPos(hwnd, IntPtr.Zero, step1.Left, step1.Top, 0, 0, MoveFlags | Native.SWP_NOSIZE);
+            WaitForDpi(hwnd, startDpi, targetDpi);
+
+            // Step 2: with the size it has now, clamp and center (the visible frame, not the invisible resize borders).
+            if (!LiveWorkArea(target, out wa) || stillValid?.Invoke() == false) return Result.Aborted;
+            if (Native.GetWindowRect(hwnd, out r))
+            {
+                var step2 = Fit(r, Frame(hwnd, r), wa);
+                Native.SetWindowPos(hwnd, IntPtr.Zero, step2.Left, step2.Top, step2.Width, step2.Height, MoveFlags);
+            }
+            if (!wasMaximized) KeepInside(hwnd, wa); // an app with a minimum size larger than the monitor: keep its title bar on screen
+        }
+        finally
+        {
+            if (wasMaximized) Native.ShowWindow(hwnd, Native.SW_MAXIMIZE);
+        }
+        return string.Equals(MonitorService.DeviceOfWindow(hwnd), target.DeviceName, StringComparison.OrdinalIgnoreCase)
+            ? Result.Moved : Result.Failed;
+    }
+
+    /// <summary>
+    /// If the window (its visible frame) sticks out past the monitor's work area, shrinks it to fit and moves it just
+    /// far enough to be fully on screen. Returns true if it had to. Maximized and minimized windows are left alone.
+    /// </summary>
+    public static bool KeepInside(IntPtr hwnd, MonitorInfo target) =>
+        LiveWorkArea(target, out var wa) && KeepInside(hwnd, wa);
+
+    private static bool KeepInside(IntPtr hwnd, Native.RECT wa)
+    {
+        if (Native.IsZoomed(hwnd) || Native.IsIconic(hwnd) || !Native.GetWindowRect(hwnd, out var r)) return false;
+        var frame = Frame(hwnd, r);
+        var inside = Clamp(r, frame, wa);
+        if (inside.Left == r.Left && inside.Top == r.Top && inside.Width == r.Width && inside.Height == r.Height) return false;
+        Native.SetWindowPos(hwnd, IntPtr.Zero, inside.Left, inside.Top, inside.Width, inside.Height, MoveFlags);
+        return true;
+    }
+
+    /// <summary>
+    /// Where a window goes to be centred on a work area: its visible part (window rect minus the invisible
+    /// <paramref name="frame"/> borders) is shrunk to fit and centred. Returns the window rect to set.
+    /// </summary>
+    public static Native.RECT Fit(Native.RECT window, Native.RECT frame, Native.RECT work)
+    {
+        int vw = Math.Min(window.Width - frame.Left - frame.Right, work.Width);
+        int vh = Math.Min(window.Height - frame.Top - frame.Bottom, work.Height);
+        int left = work.Left + (work.Width - vw) / 2, top = work.Top + (work.Height - vh) / 2;
+        return Outer(left, top, vw, vh, frame);
+    }
+
+    /// <summary>
+    /// The window rect that keeps its visible part fully inside the work area, moving it as little as possible
+    /// (and shrinking it only if it's larger than the work area).
+    /// </summary>
+    public static Native.RECT Clamp(Native.RECT window, Native.RECT frame, Native.RECT work)
+    {
+        int vLeft = window.Left + frame.Left, vTop = window.Top + frame.Top;
+        int vw = Math.Min(window.Width - frame.Left - frame.Right, work.Width);
+        int vh = Math.Min(window.Height - frame.Top - frame.Bottom, work.Height);
+        int left = Math.Max(work.Left, Math.Min(vLeft, work.Right - vw));
+        int top = Math.Max(work.Top, Math.Min(vTop, work.Bottom - vh));
+        if (vw == window.Width - frame.Left - frame.Right && vh == window.Height - frame.Top - frame.Bottom
+            && left == vLeft && top == vTop) return window;
+        return Outer(left, top, vw, vh, frame);
+    }
+
+    private static Native.RECT Outer(int visibleLeft, int visibleTop, int visibleWidth, int visibleHeight, Native.RECT frame) => new()
+    {
+        Left = visibleLeft - frame.Left, Top = visibleTop - frame.Top,
+        Right = visibleLeft + visibleWidth + frame.Right, Bottom = visibleTop + visibleHeight + frame.Bottom,
+    };
+
+    /// <summary>
+    /// The window's invisible resize borders (left, top, right, bottom thickness): the difference between its window
+    /// rect and its visible frame. Zero when Windows doesn't say.
+    /// </summary>
+    private static Native.RECT Frame(IntPtr hwnd, Native.RECT window)
+    {
+        if (Native.DwmGetWindowRect(hwnd, Native.DWMWA_EXTENDED_FRAME_BOUNDS, out var v, Marshal.SizeOf<Native.RECT>()) != 0)
+            return default;
+        var f = new Native.RECT
+        {
+            Left = v.Left - window.Left, Top = v.Top - window.Top, Right = window.Right - v.Right, Bottom = window.Bottom - v.Bottom,
+        };
+        bool sane = f.Left is >= 0 and <= MaxFrameBorder && f.Top is >= 0 and <= MaxFrameBorder
+                    && f.Right is >= 0 and <= MaxFrameBorder && f.Bottom is >= 0 and <= MaxFrameBorder;
+        return sane ? f : default;
+    }
+
+    /// <summary>
+    /// The target's current work area, straight from Windows. False if that monitor isn't where it was (monitors
+    /// changed since they were last read).
+    /// </summary>
+    private static bool LiveWorkArea(MonitorInfo target, out Native.RECT work)
+    {
+        work = target.Work;
+        var b = target.Bounds;
+        IntPtr hMon = Native.MonitorFromPoint(new Native.POINT { X = b.Left + b.Width / 2, Y = b.Top + b.Height / 2 }, Native.MONITOR_DEFAULTTONULL);
+        if (hMon == IntPtr.Zero) return false;
+        var mi = new Native.MONITORINFOEX { cbSize = Marshal.SizeOf<Native.MONITORINFOEX>() };
+        if (!Native.GetMonitorInfo(hMon, ref mi)) return false;
+        var m = mi.rcMonitor;
+        if (!string.Equals(mi.szDevice, target.DeviceName, StringComparison.OrdinalIgnoreCase)
+            || m.Left != b.Left || m.Top != b.Top || m.Right != b.Right || m.Bottom != b.Bottom) return false;
+        work = mi.rcWork;
+        return true;
+    }
+
+    /// <summary>The target monitor's DPI (96 = 100 % scale), or 0 if Windows doesn't say.</summary>
+    private static uint MonitorDpi(MonitorInfo target)
+    {
+        var b = target.Bounds;
+        IntPtr hMon = Native.MonitorFromPoint(new Native.POINT { X = b.Left + b.Width / 2, Y = b.Top + b.Height / 2 }, Native.MONITOR_DEFAULTTONULL);
+        try { return hMon != IntPtr.Zero && Native.GetDpiForMonitor(hMon, Native.MDT_EFFECTIVE_DPI, out uint x, out _) == 0 ? x : 0; }
+        catch (EntryPointNotFoundException) { return 0; }
+    }
+
+    /// <summary>
+    /// Moving between monitors with different scaling: give a per-monitor-aware app up to 200 ms to rescale for the
+    /// new DPI before its size is measured. (Other apps are scaled by Windows itself, at once.)
+    /// </summary>
+    private static void WaitForDpi(IntPtr hwnd, uint startDpi, uint targetDpi)
+    {
+        if (targetDpi == 0 || startDpi == 0 || startDpi == targetDpi) return;
+        try
+        {
+            if (Native.GetAwarenessFromDpiAwarenessContext(Native.GetWindowDpiAwarenessContext(hwnd)) != Native.DPI_AWARENESS_PER_MONITOR_AWARE)
+                return;
+            int start = Environment.TickCount;
+            while (Native.GetDpiForWindow(hwnd) != targetDpi && unchecked(Environment.TickCount - start) < DpiWaitMs)
+                Thread.Sleep(10);
+        }
+        catch (EntryPointNotFoundException) { /* older Windows: no DPI per window */ }
     }
 }

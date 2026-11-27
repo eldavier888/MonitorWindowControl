@@ -12,7 +12,10 @@ namespace MonitorWindowControl;
 internal sealed class NativeHost : IEngineHost, IDisposable
 {
     private const uint WM_DESTROY = 0x0002, WM_CLOSE = 0x0010, WM_QUERYENDSESSION = 0x0011, WM_ENDSESSION = 0x0016,
-                       WM_TIMER = 0x0113, WM_DISPLAYCHANGE = 0x007E, WM_SETTINGCHANGE = 0x001A, WM_APP_POST = 0x8001;
+                       WM_TIMER = 0x0113, WM_DISPLAYCHANGE = 0x007E, WM_SETTINGCHANGE = 0x001A, WM_APP_POST = 0x8001,
+                       WM_WTSSESSION_CHANGE = 0x02B1;
+    private const int WTS_CONSOLE_CONNECT = 1, WTS_CONSOLE_DISCONNECT = 2, WTS_REMOTE_CONNECT = 3, WTS_REMOTE_DISCONNECT = 4;
+    private const uint NOTIFY_FOR_THIS_SESSION = 0;
 
     private delegate IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
 
@@ -46,6 +49,8 @@ internal sealed class NativeHost : IEngineHost, IDisposable
     [DllImport("user32.dll")] private static extern IntPtr SetTimer(IntPtr hwnd, IntPtr id, uint ms, IntPtr proc);
     [DllImport("user32.dll")] private static extern bool KillTimer(IntPtr hwnd, IntPtr id);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandle(string? name);
+    [DllImport("wtsapi32.dll")] private static extern bool WTSRegisterSessionNotification(IntPtr hwnd, uint flags);
+    [DllImport("wtsapi32.dll")] private static extern bool WTSUnRegisterSessionNotification(IntPtr hwnd);
 
     private readonly WndProc _wndProc; // keep a reference so the GC can't collect it
     private readonly IntPtr _hwnd;
@@ -55,6 +60,11 @@ internal sealed class NativeHost : IEngineHost, IDisposable
 
     /// <summary>Called when Windows reports that monitors changed (also the taskbar / work area).</summary>
     public Action? DisplayChanged { get; set; }
+
+    /// <summary>Called when Remote Desktop connects or disconnects, or this PC's own screen is reconnected.</summary>
+    public Action? SessionChanged { get; set; }
+
+    private readonly bool _sessionNotifications;
 
     public NativeHost()
     {
@@ -72,6 +82,9 @@ internal sealed class NativeHost : IEngineHost, IDisposable
         _hwnd = CreateWindowEx(WS_EX_TOOLWINDOW, wc.lpszClassName, "Monitor Window Control helper", WS_POPUP,
             0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, wc.hInstance, IntPtr.Zero);
         if (_hwnd == IntPtr.Zero) throw new InvalidOperationException("Could not create the helper's message window.");
+        // Remote Desktop connecting / disconnecting (not critical: the engine also checks on every new window).
+        try { _sessionNotifications = WTSRegisterSessionNotification(_hwnd, NOTIFY_FOR_THIS_SESSION); }
+        catch (Exception) { _sessionNotifications = false; }
     }
 
     public IEngineTimer CreateTimer(int intervalMs, Action tick)
@@ -118,6 +131,10 @@ internal sealed class NativeHost : IEngineHost, IDisposable
                 case WM_SETTINGCHANGE when wParam == (IntPtr)0x2F: // SPI_SETWORKAREA: taskbar moved / resized
                     DisplayChanged?.Invoke();
                     break;
+                case WM_WTSSESSION_CHANGE when (int)wParam is WTS_CONSOLE_CONNECT or WTS_CONSOLE_DISCONNECT
+                                                         or WTS_REMOTE_CONNECT or WTS_REMOTE_DISCONNECT:
+                    SessionChanged?.Invoke();
+                    break;
                 case WM_CLOSE:
                     // Someone asked the helper to close (taskkill without /f, an installer…): exit cleanly
                     // instead of letting Windows destroy the window under a still-running loop.
@@ -139,6 +156,7 @@ internal sealed class NativeHost : IEngineHost, IDisposable
     public void Dispose()
     {
         foreach (var t in _timers.Values) t.Stop();
+        if (_sessionNotifications) WTSUnRegisterSessionNotification(_hwnd);
         DestroyWindow(_hwnd);
     }
 

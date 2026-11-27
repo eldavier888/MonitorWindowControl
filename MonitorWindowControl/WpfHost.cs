@@ -12,22 +12,32 @@ public sealed class WpfHost : IEngineHost, IDisposable
 
     public WpfHost(Dispatcher dispatcher) => _dispatcher = dispatcher;
 
-    /// <summary>Forward Windows' "monitors changed" notifications to the engine.</summary>
+    /// <summary>Forward Windows' "monitors changed" and "session changed" (Remote Desktop) notifications to the engine.</summary>
     public void Attach(Engine engine)
     {
         _engine = engine;
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+        SystemEvents.SessionSwitch += OnSessionSwitch;
     }
 
     // Can arrive on another thread.
     private void OnDisplaySettingsChanged(object? sender, EventArgs e) =>
         _dispatcher.BeginInvoke(() => _engine?.OnDisplaySettingsChanged());
 
+    // Remote Desktop connected or disconnected, or this PC's own screen reconnected. (Can arrive on another thread.)
+    private void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
+    {
+        if (e.Reason is SessionSwitchReason.RemoteConnect or SessionSwitchReason.RemoteDisconnect
+                     or SessionSwitchReason.ConsoleConnect or SessionSwitchReason.ConsoleDisconnect)
+            _dispatcher.BeginInvoke(() => _engine?.OnSessionChanged());
+    }
+
     public IEngineTimer CreateTimer(int intervalMs, Action tick) => new Timer(_dispatcher, intervalMs, tick);
 
     public void Dispose()
     {
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        SystemEvents.SessionSwitch -= OnSessionSwitch;
         _engine = null;
     }
 

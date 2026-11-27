@@ -17,6 +17,7 @@
     -->
     <ui:FluentWindow.Resources>
         <local:HideWhenTrueConverter x:Key="HideWhenTrue" />
+        <BooleanToVisibilityConverter x:Key="ShowWhenTrue" />
         <Style x:Key="PageTitle" TargetType="TextBlock">
             <Setter Property="FontSize" Value="28" />
             <Setter Property="FontWeight" Value="SemiBold" />
@@ -106,6 +107,10 @@
                         <TextBlock Style="{StaticResource Secondary}" FontSize="13" Margin="2,0,0,16"
                                    Text="Opens each app's windows on the monitor you actually use that app on. It learns that by itself, so there's nothing you have to set up." />
 
+                        <!-- Shown while something outside the app pauses it (Remote Desktop, duplicated monitors) -->
+                        <ui:InfoBar x:Name="PauseInfoBar" IsOpen="False" IsClosable="False" Severity="Informational" Margin="0,0,0,12"
+                                    AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Status" />
+
                         <ui:CardControl Icon="{ui:SymbolIcon Symbol=Power24}">
                             <ui:CardControl.Header>
                                 <StackPanel Margin="0,0,16,0">
@@ -152,6 +157,18 @@
                                 <ComboBoxItem Content="Leave where Windows puts them" />
                             </ComboBox>
                         </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=DesktopArrowRight24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="While connected with Remote Desktop" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="When you use this PC from another one, the other PC's monitors replace these. Learning always pauses then." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ComboBox x:Name="RemoteCombo" MinWidth="250" AutomationProperties.Name="While connected with Remote Desktop" SelectionChanged="RemoteCombo_SelectionChanged">
+                                <ComboBoxItem Content="Pause" />
+                                <ComboBoxItem Content="Keep moving windows" />
+                            </ComboBox>
+                        </ui:CardControl>
 
                         <TextBlock Style="{StaticResource SectionHeader}" Text="Startup" />
                         <ui:CardControl Icon="{ui:SymbolIcon Symbol=Rocket24}">
@@ -180,23 +197,39 @@
                         <ItemsControl x:Name="MonitorsList">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <ui:CardControl Icon="{ui:SymbolIcon Symbol=Desktop24}">
-                                        <ui:CardControl.Header>
-                                            <StackPanel Margin="0,0,16,0">
-                                                <TextBlock Style="{StaticResource CardTitle}" Text="{Binding Label}" />
-                                                <TextBlock Style="{StaticResource Secondary}" Text="{Binding Details}" />
+                                    <StackPanel>
+                                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Desktop24}">
+                                            <ui:CardControl.Header>
+                                                <StackPanel Margin="0,0,16,0">
+                                                    <TextBlock Style="{StaticResource CardTitle}" Text="{Binding Label}" />
+                                                    <TextBlock Style="{StaticResource Secondary}" Text="{Binding Details}" />
+                                                </StackPanel>
+                                            </ui:CardControl.Header>
+                                            <StackPanel Orientation="Horizontal">
+                                                <ui:Button Content="Name &amp; number" Click="RenameMonitor_Click"
+                                                           Visibility="{Binding CanRename, Converter={StaticResource ShowWhenTrue}}"
+                                                           AutomationProperties.Name="{Binding Name, StringFormat='Name and number for {0}'}"
+                                                           ToolTip="Give this monitor your own name and number, for example &quot;2 · TV&quot;" />
+                                                <ui:Button Content="Make main" Margin="8,0,0,0" Click="MakeMain_Click"
+                                                           AutomationProperties.Name="{Binding Name, StringFormat='Make {0} the main monitor'}"
+                                                           Visibility="{Binding IsPrimary, Converter={StaticResource HideWhenTrue}}"
+                                                           ToolTip="Make this the main monitor in Windows (taskbar clock, Start menu, and where new apps open)" />
                                             </StackPanel>
-                                        </ui:CardControl.Header>
-                                        <StackPanel Orientation="Horizontal">
-                                            <ui:Button Content="Name &amp; number" Click="RenameMonitor_Click"
-                                                       AutomationProperties.Name="{Binding Name, StringFormat='Name and number for {0}'}"
-                                                       ToolTip="Give this monitor your own name and number, for example &quot;2 · TV&quot;" />
-                                            <ui:Button Content="Make main" Margin="8,0,0,0" Click="MakeMain_Click"
-                                                       AutomationProperties.Name="{Binding Name, StringFormat='Make {0} the main monitor'}"
-                                                       Visibility="{Binding IsPrimary, Converter={StaticResource HideWhenTrue}}"
-                                                       ToolTip="Make this the main monitor in Windows (taskbar clock, Start menu, and where new apps open)" />
-                                        </StackPanel>
-                                    </ui:CardControl>
+                                        </ui:CardControl>
+                                        <!-- Wireless, virtual and USB monitors: are they temporary? -->
+                                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Cast24}" Margin="40,0,0,4"
+                                                        Visibility="{Binding ShowTemporaryOption, Converter={StaticResource ShowWhenTrue}}">
+                                            <ui:CardControl.Header>
+                                                <StackPanel Margin="0,0,16,0">
+                                                    <TextBlock Style="{StaticResource CardTitle}" Text="Apps can open here" />
+                                                    <TextBlock Style="{StaticResource Secondary}"
+                                                               Text="Turn off for a monitor you only connect now and then, like a wireless one. Apps then aren't learned on it, and it isn't used when another monitor is off. Apps you set to open here still do." />
+                                                </StackPanel>
+                                            </ui:CardControl.Header>
+                                            <ui:ToggleSwitch IsChecked="{Binding AppsCanOpenHere, Mode=OneWay}" Click="AppsCanOpenHere_Click"
+                                                             AutomationProperties.Name="{Binding Name, StringFormat='Apps can open on {0}'}" />
+                                        </ui:CardControl>
+                                    </StackPanel>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>

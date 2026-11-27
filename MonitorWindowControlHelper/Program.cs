@@ -57,6 +57,7 @@ internal static class Program
         using var host = new NativeHost();
         using var engine = new Engine(host);
         host.DisplayChanged = engine.OnDisplaySettingsChanged;
+        host.SessionChanged = engine.OnSessionChanged;
         engine.Start(importLegacy: false, who: "Helper");
 
         if (engine.Settings.RunMode != RunModes.Helper)
@@ -96,6 +97,7 @@ internal static class Program
         using var host = new NativeHost();
         using var engine = new Engine(host);
         host.DisplayChanged = engine.OnDisplaySettingsChanged;
+        host.SessionChanged = engine.OnSessionChanged;
         engine.Start(importLegacy: false, who: $"Shortcut for {key ?? target}");
 
         // The saved launch target is kept up to date (apps that update themselves can move); prefer it.
