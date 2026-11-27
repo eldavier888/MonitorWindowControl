@@ -11,7 +11,8 @@ namespace MonitorWindowControl;
 /// </summary>
 internal sealed class NativeHost : IEngineHost, IDisposable
 {
-    private const uint WM_DESTROY = 0x0002, WM_TIMER = 0x0113, WM_DISPLAYCHANGE = 0x007E, WM_APP_POST = 0x8001;
+    private const uint WM_DESTROY = 0x0002, WM_CLOSE = 0x0010, WM_QUERYENDSESSION = 0x0011, WM_ENDSESSION = 0x0016,
+                       WM_TIMER = 0x0113, WM_DISPLAYCHANGE = 0x007E, WM_SETTINGCHANGE = 0x001A, WM_APP_POST = 0x8001;
 
     private delegate IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
 
@@ -35,11 +36,12 @@ internal sealed class NativeHost : IEngineHost, IDisposable
     private static extern IntPtr CreateWindowEx(uint exStyle, string className, string title, uint style,
         int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
     [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr hwnd);
-    [DllImport("user32.dll")] private static extern IntPtr DefWindowProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
-    [DllImport("user32.dll")] private static extern int GetMessage(out MSG msg, IntPtr hwnd, uint min, uint max);
+    // The window class is Unicode, so the message functions must be the Unicode ("W") ones too.
+    [DllImport("user32.dll", EntryPoint = "DefWindowProcW")] private static extern IntPtr DefWindowProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", EntryPoint = "GetMessageW")] private static extern int GetMessage(out MSG msg, IntPtr hwnd, uint min, uint max);
     [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG msg);
-    [DllImport("user32.dll")] private static extern IntPtr DispatchMessage(ref MSG msg);
-    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", EntryPoint = "DispatchMessageW")] private static extern IntPtr DispatchMessage(ref MSG msg);
+    [DllImport("user32.dll", EntryPoint = "PostMessageW")] private static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern void PostQuitMessage(int code);
     [DllImport("user32.dll")] private static extern IntPtr SetTimer(IntPtr hwnd, IntPtr id, uint ms, IntPtr proc);
     [DllImport("user32.dll")] private static extern bool KillTimer(IntPtr hwnd, IntPtr id);
@@ -51,7 +53,7 @@ internal sealed class NativeHost : IEngineHost, IDisposable
     private readonly ConcurrentQueue<Action> _posted = new();
     private int _nextTimerId = 1;
 
-    /// <summary>Called when Windows reports that monitors changed.</summary>
+    /// <summary>Called when Windows reports that monitors changed (also the taskbar / work area).</summary>
     public Action? DisplayChanged { get; set; }
 
     public NativeHost()
@@ -113,6 +115,18 @@ internal sealed class NativeHost : IEngineHost, IDisposable
                 case WM_DISPLAYCHANGE:
                     DisplayChanged?.Invoke();
                     break;
+                case WM_SETTINGCHANGE when wParam == (IntPtr)0x2F: // SPI_SETWORKAREA: taskbar moved / resized
+                    DisplayChanged?.Invoke();
+                    break;
+                case WM_CLOSE:
+                    // Someone asked the helper to close (taskkill without /f, an installer…): exit cleanly
+                    // instead of letting Windows destroy the window under a still-running loop.
+                    Log.Write("Helper: asked to close; stopping.");
+                    Quit();
+                    return IntPtr.Zero;
+                case WM_DESTROY:
+                    Quit();
+                    return IntPtr.Zero;
             }
         }
         catch (Exception ex)

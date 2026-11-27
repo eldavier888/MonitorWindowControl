@@ -19,11 +19,12 @@ idea that an app "belongs" on a particular screen.
 
 Monitor Window Control is a working prototype of how this could work in Windows itself:
 
-- **A home monitor per app.** New windows open on the app's home, or on the main monitor if that one isn't connected.
+- **A home monitor per app.** New windows open on the app's home, or on the main monitor while that one isn't connected
+  (that's temporary: it isn't learned as the new home).
 - **Learned, not configured.** The monitor where you actively use an app (the focused window, for a few seconds) becomes its home.
   Background windows never count, so a window forgotten on the TV can't teach it the wrong thing.
 - **Easy overrides.** You can pin an app to a monitor, or mark it "never move".
-- **Never fights you.** Each new window is placed once. If you drag it somewhere else, it stays there.
+- **Never fights you.** Each new window is placed once. If you move it somewhere else, it stays there.
 
 Existing features solve different problems. "Remember window locations based on monitor connection" restores
 windows when a monitor reconnects. Snap Layouts, FancyZones and Workspaces arrange windows. None of them say
@@ -35,8 +36,9 @@ which monitor an app's new windows should open on.
    (for example `C:\Tools\MonitorWindowControl\`). It's a single file that needs no installing and no admin rights.
    It uses the free [.NET Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) 8 or newer, which
    many PCs already have. If yours doesn't, Windows offers to download it the first time you start the app.
-2. Double-click it. The first time, its window opens. After that it starts quietly in the tray
+2. Double-click it and its window opens. When you close the window it keeps working in the tray
    (look for the blue monitor-with-a-house icon; it may be under the **^** arrow next to the clock).
+   You don't need to set anything: just use your apps, and each one is learned after a few seconds on a monitor.
 3. To have it start when you sign in, turn on **Start with Windows** in its window.
 
 Coming from the earlier AutoHotkey version (it was called WindowHome)? Put its `WindowHome.ini` in the **same folder as MonitorWindowControl.exe**
@@ -54,7 +56,7 @@ setting of its own. So you choose how much runs in the background (**How it runs
 | Mode | What runs in the background | What gets placed |
 |---|---|---|
 | **In the tray** (default) | The app, in the tray (about 0% CPU, ~30 MB) | Every new window. Learns where you use apps. |
-| **Tiny invisible helper** | Only a small helper: no window, no tray icon (about 0% CPU, ~5 MB). The settings window runs only while it's open. | Every new window. Learns where you use apps. |
+| **Small background helper** | Only a small helper: no window, no tray icon (about 0% CPU, ~5 MB). The settings window runs only while it's open. | Every new window. Learns where you use apps. |
 | **Nothing in the background** | Nothing at all | Only apps you open from their **launch shortcuts** (Start menu → Monitor Window Control). A helper starts with the app, places its window, and exits after a few seconds. Windows opened any other way (links, apps opening extra windows, autostart) aren't moved, and nothing is learned automatically. |
 
 To make a launch shortcut: select an app in the list, save where it opens, then press **Create launch shortcut**.
@@ -63,13 +65,16 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
 
 ## Using it
 
-- **Tray icon** (tray mode): double-click to open the window. Right-click for *Open*, *Enabled* (pause/resume), *Exit*.
-  Closing the window just puts it back in the tray. In the other modes there's no tray icon: start
-  `MonitorWindowControl.exe` again to change settings, and closing its window closes it completely.
-- **Enabled**: moves new windows to their app's monitor.
+- **Tray icon** (tray mode): double-click to open the window. Right-click for *Open*, *Move new windows*
+  (pause/resume), *Exit*. Closing the window just puts it back in the tray (**Exit** in the window closes it completely).
+  In the other modes there's no tray icon: start `MonitorWindowControl.exe` again to change settings, and closing
+  its window closes it completely.
+- **Move new windows**: moves new windows to their app's monitor. Turn it off to pause everything (learning too).
 - **Learn automatically**: only the window you're actually using counts. If the same app stays focused on the
   same monitor for two checks in a row (about 4 seconds), that monitor becomes its home. Windows sitting in the
-  background never teach it anything.
+  background never teach it anything. Nothing is learned while only one monitor is connected, or for 30 seconds
+  after monitors change (a TV switched on, waking from sleep, a game changing resolution), because then you use
+  apps where they *have* to be, not where you want them. Installers and uninstallers aren't remembered.
 - **Apps it hasn't learned yet**: open them on the main monitor, or leave them where Windows puts them.
 - **Your monitors**: shows each monitor by its model name; "(main)" is the one set as main display in Windows.
   - **Name & number**: give a monitor your own name ("TV") and number ("3"). It then shows as "3 · TV"
@@ -83,23 +88,26 @@ put one on the desktop. Your existing shortcuts are never changed. Launch shortc
     whichever of those you used it on most recently;
   - **Never move this app**: leave it alone.
 
-  Your choice is "set by you": learning never overrides it. **Forget** removes one app;
-  **Forget all…** removes everything (asks first).
-- **Open log**: every move, learn, pin and forget is written to a log with the time.
+  Your choice is "Set by you": learning never overrides it. **Forget** (or the Delete key) removes one app and
+  **Forget all…** removes everything; both ask first. With many apps, type in **Search apps** to filter the list.
+- **Open activity log**: every move, learn, pin and forget is written to a log with the time.
+- Everything works with the keyboard (Tab, arrow keys, Space/Enter) and with Narrator.
 
 How it decides, for each new window (about 0.4 s after it appears, because apps often reposition themselves
 right after opening):
 
 | The app is... | Monitor Window Control... |
 |---|---|
-| learned or set by you | moves it to that monitor. If that monitor is off/disconnected, to the main monitor |
-| set to "Where I used it last" | moves it to the monitor (of the ones you ticked) where you last used it |
+| learned or set by you | moves it to that monitor. If that monitor is off/disconnected, to the main monitor for now |
+| set to "Where I used it last" | moves it to the monitor (of the ones you ticked) where you last used it. If that one is off, to another one you ticked; if you never used it yet, leaves it |
 | set to "Never move" | leaves it alone |
 | not known yet | moves it to the main monitor (or leaves it, per your setting) |
 
-Each window is handled once. If you drag it somewhere else afterwards, Monitor Window Control won't move it back.
-Minimized and fullscreen windows are skipped. Store apps (Netflix, Disney+, Calculator…) all run inside one
-Windows process, so they're told apart by window title and shown as "(Store app)".
+Each window is handled once. If you move it somewhere else afterwards, Monitor Window Control won't move it back.
+(It only corrects an app that jumps straight back to where it opened, within the first second.)
+Minimized, fullscreen and not-responding windows are skipped. Store apps (Calculator…) all run inside one
+Windows process, so they're told apart by window title and shown as "(Store app)". Web apps installed from a
+browser (Netflix, Disney+, Prime Video, Crave… in Edge or Chrome) are recognised as their own apps and shown as "Web app".
 Windows that run as administrator can't be moved by a normal app; Monitor Window Control skips them and notes it in the log.
 
 ## Where things are stored
@@ -112,8 +120,9 @@ Windows that run as administrator can't be moved by a normal app; Monitor Window
 The tiny helper is unpacked to `%LocalAppData%\MonitorWindowControl\MonitorWindowControlHelper.exe` when a mode
 or shortcut needs it.
 
-To start completely fresh: Exit Monitor Window Control (tray → Exit, or set "How it runs" to tray first),
-delete those folders and Start menu → Monitor Window Control, then start it again.
+To start completely fresh: in the window, press **Forget all…** (this also deletes your launch shortcuts), turn off
+**Start with Windows**, set **How it runs** to the tray, and press **Exit**. Then delete those two folders and
+Start menu → Monitor Window Control, and start it again.
 
 ## Build it yourself (optional)
 

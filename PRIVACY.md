@@ -24,8 +24,9 @@ It saves only what it needs to work, **on your PC**:
   Start menu → Monitor Window Control (and optionally on your desktop).
 - The small helper program is unpacked to `%LocalAppData%\MonitorWindowControl`.
 
-None of this ever leaves your computer. You can read or delete these files at any time. Deleting the folders
-above, the Start menu folder, and turning off "Start with Windows" removes everything the app stored.
+None of this ever leaves your computer. You can read or delete these files at any time. To remove everything the
+app stored: press **Forget all…** (it also deletes your launch shortcuts, including any on the desktop), turn off
+"Start with Windows", exit the app, then delete the two folders above and Start menu → Monitor Window Control.
 
 ## Changing or removing your data
 

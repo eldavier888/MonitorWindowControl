@@ -19,12 +19,7 @@ public static class HelperManager
 
     public static bool IsAvailable => Assembly.GetExecutingAssembly().GetManifestResourceInfo(ResourceName) != null;
 
-    public static bool IsRunning()
-    {
-        if (!Mutex.TryOpenExisting(HelperMutexName, out var m)) return false;
-        m.Dispose();
-        return true;
-    }
+    public static bool IsRunning() => Native.NamedMutexExists(HelperMutexName);
 
     /// <summary>
     /// Unpacks the helper if it's missing or a different version (e.g. after updating the app). If an older
@@ -129,6 +124,6 @@ public static class HelperManager
         }
         catch { /* not running after all */ }
         for (int i = 0; i < 60 && IsRunning(); i++) Thread.Sleep(50); // ≤ 3 s
-        if (IsRunning()) Log.Write("The helper didn't stop when asked.");
+        if (IsRunning()) Log.Write("The helper didn't stop when asked (if it was started with \"Run as administrator\", only a copy run as administrator can stop it).");
     }
 }

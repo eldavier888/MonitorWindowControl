@@ -11,15 +11,13 @@ public interface IEngineTimer
 }
 
 /// <summary>
-/// What the engine needs from the program it runs in: timers and a way to run code on its thread.
+/// What the engine needs from the program it runs in: timers on its thread.
 /// The settings app provides it with WPF; the tiny helper with a plain Windows message loop.
 /// The host also calls <see cref="Engine.OnDisplaySettingsChanged"/> when monitors change.
 /// </summary>
 public interface IEngineHost
 {
     IEngineTimer CreateTimer(int intervalMs, Action tick);
-    /// <summary>Runs the action later on the engine's thread (safe to call from any thread).</summary>
-    void Post(Action action);
 }
 
 /// <summary>How Monitor Window Control runs in the background.</summary>

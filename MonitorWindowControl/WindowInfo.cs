@@ -160,11 +160,25 @@ internal static class WindowInfo
             do
             {
                 if (e.th32ProcessID == (uint)pid)
-                    return e.th32ParentProcessID == 0 ? null : GetProcessPath((int)e.th32ParentProcessID);
+                {
+                    if (e.th32ParentProcessID == 0) return null;
+                    // Windows reuses process ids: the "parent" only counts if it started before this process.
+                    long child = StartTime(pid), parent = StartTime((int)e.th32ParentProcessID);
+                    if (child == 0 || parent == 0 || parent > child) return null;
+                    return GetProcessPath((int)e.th32ParentProcessID);
+                }
             } while (Native.Process32Next(snap, ref e));
             return null;
         }
         finally { Native.CloseHandle(snap); }
+    }
+
+    private static long StartTime(int pid)
+    {
+        IntPtr hp = Native.OpenProcess(Native.PROCESS_QUERY_LIMITED_INFORMATION, false, (uint)pid);
+        if (hp == IntPtr.Zero) return 0;
+        try { return Native.GetProcessTimes(hp, out long created, out _, out _, out _) ? created : 0; }
+        finally { Native.CloseHandle(hp); }
     }
 
     private static string? GetAppUserModelId(int pid)
@@ -183,6 +197,19 @@ internal static class WindowInfo
     // ------------------------------------------------------------------ web apps inside a browser
 
     /// <summary>Key prefix for web apps: "app:" + their app id (e.g. "app:4DF9E0F8.Netflix_mcm4njqhnhss8!Netflix.App").</summary>
+    /// <summary>
+    /// Programs you run once (installers, uninstallers, updaters): not worth remembering, they'd only fill the list.
+    /// They're still placed like any app you haven't set; you can also set one yourself.
+    /// </summary>
+    public static bool IsOneOffApp(string key)
+    {
+        if (key.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) return true; // setup programs unpacked to Temp
+        if (!key.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
+        string n = key[..^4].ToLowerInvariant();
+        return n.Contains("setup") || n.Contains("install") || n.StartsWith("unins") || n.Contains("uninstall")
+               || n == "update" || n.EndsWith("updater") || n.Contains("_update") || n == "msiexec";
+    }
+
     public const string WebAppKeyPrefix = "app:";
 
     private static readonly HashSet<string> BrowserExes = new(StringComparer.OrdinalIgnoreCase)

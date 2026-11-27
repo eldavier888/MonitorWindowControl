@@ -24,12 +24,22 @@
     <RootNamespace>MonitorWindowControl</RootNamespace>
     <ApplicationManifest>..\MonitorWindowControl\app.manifest</ApplicationManifest>
     <ApplicationIcon>..\MonitorWindowControl\app.ico</ApplicationIcon>
-    <Version>1.4.3</Version>
+    <Version>1.5.0</Version>
     <Product>Monitor Window Control</Product>
     <AssemblyTitle>Monitor Window Control helper</AssemblyTitle>
     <!-- Shared files use platform APIs; this is Windows-only anyway. -->
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Keep the garbage collector's first generation small. By default its size follows the CPU's cache (often
+      20+ MB on a modern PC), which for a helper that allocates almost nothing just means 20 MB of idle memory.
+      4 MB keeps it at about 5 MB with no measurable CPU cost.
+    -->
+    <RuntimeHostConfigurationOption Include="GCgen0size" Value="0x400000" />
+    <RuntimeHostConfigurationOption Include="System.GC.Concurrent" Value="false" />
+  </ItemGroup>
 
   <ItemGroup>
     <Compile Include="..\MonitorWindowControl\Native.cs" Link="Shared\Native.cs" />

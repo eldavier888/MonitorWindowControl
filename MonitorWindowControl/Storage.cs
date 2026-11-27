@@ -121,6 +121,8 @@ public static class SettingsStore
 {
     private const string LockName = @"Local\MonitorWindowControl.Settings";
     private static DateTime _loadedStampUtc;
+    /// <summary>Set when settings.json exists but couldn't be read at startup: never overwrite it until it's read.</summary>
+    private static bool _notReadYet;
 
     /// <summary>
     /// Cross-process lock for "re-read, change, save", so the settings window and the helper never overwrite
@@ -148,8 +150,17 @@ public static class SettingsStore
     {
         existed = File.Exists(Paths.SettingsFile);
         if (!existed) return new AppSettings();
-        var (settings, error) = ReadWithRetry();
+        var (settings, error, busy) = ReadWithRetry(busyAttempts: 50); // up to ~3 s if another program holds it
         if (settings != null) return settings;
+        if (busy)
+        {
+            // Locked (antivirus, backup, sync…), not broken: run with defaults for now, re-read it as soon as possible,
+            // and don't save over it meanwhile.
+            _notReadYet = true;
+            _loadedStampUtc = DateTime.MinValue;
+            Log.Write($"settings.json is in use by another program ({error}); it will be read again shortly.");
+            return new AppSettings();
+        }
 
         // Really unreadable (not just busy): keep a copy so nothing is lost, start fresh.
         string bad = Paths.SettingsFile + ".broken";
@@ -168,11 +179,12 @@ public static class SettingsStore
     /// <summary>Re-reads settings after another process changed them; null if it can't be read right now (try again later).</summary>
     public static AppSettings? TryReload() => ReadWithRetry().settings;
 
-    private static (AppSettings? settings, string? error) ReadWithRetry()
+    private static (AppSettings? settings, string? error, bool busy) ReadWithRetry(int busyAttempts = 5)
     {
         string? error = null;
+        bool busy = false;
         DateTime stamp = default;
-        for (int attempt = 0; attempt < 5; attempt++)
+        for (int attempt = 0; attempt < busyAttempts; attempt++)
         {
             if (attempt > 0) Thread.Sleep(60);
             try
@@ -180,19 +192,17 @@ public static class SettingsStore
                 stamp = File.GetLastWriteTimeUtc(Paths.SettingsFile);
                 string json = File.ReadAllText(Paths.SettingsFile);
                 var s = JsonSerializer.Deserialize(json, SettingsJson.Default.AppSettings) ?? new AppSettings();
-                s.Apps ??= new List<AppRule>();
-                s.Apps.RemoveAll(a => string.IsNullOrWhiteSpace(a.Key));
-                foreach (var a in s.Apps) a.AllowedMonitors ??= new();
-                s.MonitorNicknames ??= new();
-                s.RunMode = RunModes.Normalize(s.RunMode);
+                Clean(s);
                 _loadedStampUtc = stamp;
-                return (s, null);
+                _notReadYet = false;
+                return (s, null, false);
             }
-            catch (IOException ex) { error = ex.Message; }                 // being written by the other process
-            catch (UnauthorizedAccessException ex) { error = ex.Message; }
-            catch (JsonException ex)
+            catch (IOException ex) { error = ex.Message; busy = true; }   // being written by the other process
+            catch (UnauthorizedAccessException ex) { error = ex.Message; busy = true; }
+            catch (Exception ex)                                           // invalid JSON, or valid JSON with impossible values
             {
                 error = ex.Message;
+                busy = false;
                 if (attempt >= 1)
                 {
                     // Really broken, not just mid-write: don't re-try on every check until the file changes again.
@@ -201,15 +211,43 @@ public static class SettingsStore
                 }
             }
         }
-        return (null, error);
+        return (null, error, busy);
+    }
+
+    /// <summary>
+    /// Repairs what a hand-edited or damaged (but still valid JSON) file can contain: missing lists, null entries,
+    /// entries without a key, duplicates. Anything that can't be repaired is dropped, never crashes the app.
+    /// </summary>
+    private static void Clean(AppSettings s)
+    {
+        s.Apps ??= new List<AppRule>();
+        s.Apps.RemoveAll(a => a == null || string.IsNullOrWhiteSpace(a.Key));
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        s.Apps.RemoveAll(a => !seen.Add(a.Key));
+        foreach (var a in s.Apps)
+        {
+            a.DisplayName ??= a.Key;
+            a.AllowedMonitors ??= new();
+            a.AllowedMonitors.RemoveAll(m => m == null);
+            foreach (var m in a.AllowedMonitors) m.Device ??= "";
+        }
+        s.MonitorNicknames ??= new();
+        s.MonitorNicknames.RemoveAll(n => n == null || n.Monitor == null);
+        foreach (var n in s.MonitorNicknames) { n.Monitor.Device ??= ""; n.Nickname ??= ""; }
+        s.RunMode = RunModes.Normalize(s.RunMode);
     }
 
     public static void Save(AppSettings s)
     {
+        if (_notReadYet && File.Exists(Paths.SettingsFile))
+        {
+            Log.Write("Not saving: settings.json couldn't be read yet, and saving now would replace your settings.");
+            return;
+        }
+        string tmp = Paths.SettingsFile + "." + Environment.ProcessId + ".tmp";
         try
         {
             Directory.CreateDirectory(Paths.Dir);
-            string tmp = Paths.SettingsFile + "." + Environment.ProcessId + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(s, SettingsJson.Default.AppSettings));
             // A rename keeps the file's time stamp: remember ours, so a later write by the other process is noticed.
             var myStamp = File.GetLastWriteTimeUtc(tmp);
@@ -224,6 +262,7 @@ public static class SettingsStore
         catch (Exception ex)
         {
             Log.Write("Could not save settings: " + ex.Message);
+            try { File.Delete(tmp); } catch { }
         }
     }
 }

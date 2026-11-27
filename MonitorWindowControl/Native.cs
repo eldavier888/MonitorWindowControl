@@ -163,7 +163,37 @@ public static class Native
     // ---------- Changing the main (primary) display ----------
     public const int ENUM_CURRENT_SETTINGS = -1;
     public const int DM_POSITION = 0x00000020;
+    /// <summary>
+    /// True if a named mutex exists. A copy started with "Run as administrator" creates its objects so that normal
+    /// copies can't open them ("access denied"): that still means it exists.
+    /// </summary>
+    public static bool NamedMutexExists(string name)
+    {
+        try
+        {
+            if (!System.Threading.Mutex.TryOpenExisting(name, out var m)) return false;
+            m.Dispose();
+            return true;
+        }
+        catch (UnauthorizedAccessException) { return true; }
+        catch (Exception) { return false; }
+    }
+
+    /// <summary>Like <c>new Mutex(true, name, out createdNew)</c>, but a copy run as administrator holding it counts as "not new".</summary>
+    public static System.Threading.Mutex? TryCreateOwnedMutex(string name, out bool createdNew)
+    {
+        try { return new System.Threading.Mutex(true, name, out createdNew); }
+        catch (UnauthorizedAccessException) { createdNew = false; return null; }
+    }
+
     public const uint CDS_UPDATEREGISTRY = 0x00000001;
+
+    [DllImport("kernel32.dll")]
+    public static extern bool GetProcessTimes(IntPtr hProcess, out long creation, out long exit, out long kernel, out long user);
+
+    public const uint SMTO_BLOCK = 0x0001, SMTO_ABORTIFHUNG = 0x0002;
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW")]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out IntPtr result);
     public const uint CDS_SET_PRIMARY = 0x00000010;
     public const uint CDS_NORESET = 0x10000000;
     public const int DISP_CHANGE_SUCCESSFUL = 0;

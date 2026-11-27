@@ -4,23 +4,40 @@
                  xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
                  xmlns:local="clr-namespace:MonitorWindowControl"
                  Title="Monitor Window Control"
-                 Width="760" Height="1000" MinWidth="600" MinHeight="560"
+                 Width="1100" Height="780" MinWidth="520" MinHeight="480"
                  WindowStartupLocation="Manual"
                  ExtendsContentIntoTitleBar="True"
                  WindowBackdropType="Mica"
                  WindowCornerPreference="Round"
                  Icon="pack://application:,,,/app.ico">
+    <!--
+        Laid out like Windows 11 Settings: navigation on the left, one page at a time on the right, each setting a
+        card with an icon, a title and description, and its control on the right. Narrow windows collapse the
+        navigation to icons; on wide windows the Apps page shows the selected app's options beside the list.
+    -->
     <ui:FluentWindow.Resources>
         <local:HideWhenTrueConverter x:Key="HideWhenTrue" />
-        <Style x:Key="SectionHeader" TargetType="TextBlock">
-            <Setter Property="FontSize" Value="16" />
+        <Style x:Key="PageTitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="28" />
             <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="Margin" Value="0,22,0,8" />
+            <Setter Property="Margin" Value="0,0,0,6" />
+        </Style>
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="2,22,0,8" />
         </Style>
         <Style x:Key="Secondary" TargetType="TextBlock">
             <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
             <Setter Property="FontSize" Value="12" />
             <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+        <Style x:Key="CardTitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+        <Style TargetType="ui:CardControl" BasedOn="{StaticResource {x:Type ui:CardControl}}">
+            <Setter Property="Margin" Value="0,0,0,4" />
         </Style>
     </ui:FluentWindow.Resources>
 
@@ -30,193 +47,322 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <ui:TitleBar Grid.Row="0" Title="Monitor Window Control" ShowMaximize="False" />
+        <ui:TitleBar Grid.Row="0" Title="Monitor Window Control" />
 
-        <ScrollViewer x:Name="PageScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto">
-            <StackPanel Margin="24,4,24,24" RequestBringIntoView="Page_RequestBringIntoView">
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="NavColumn" Width="280" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
 
-                <TextBlock FontSize="14" TextWrapping="Wrap"
-                           Text="Opens each app's windows on the monitor you actually use that app on. It learns by noticing which monitor you work with each app on." />
+            <!-- Navigation -->
+            <Grid Margin="8,0,4,12">
+                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                <StackPanel Orientation="Horizontal" Margin="10,6,0,18">
+                    <Image Source="pack://application:,,,/app.ico" Width="40" Height="40" />
+                    <StackPanel x:Name="NavIdentity" Margin="12,0,0,0" VerticalAlignment="Center">
+                        <TextBlock Text="Monitor Window Control" FontWeight="SemiBold" FontSize="14" />
+                        <TextBlock x:Name="NavStatus" Style="{StaticResource Secondary}" />
+                    </StackPanel>
+                </StackPanel>
+                <ui:ListView x:Name="NavList" Grid.Row="1" SelectionMode="Single" SelectionChanged="NavList_SelectionChanged"
+                             AutomationProperties.Name="Pages">
+                    <ui:ListViewItem Tag="General" AutomationProperties.Name="General">
+                        <StackPanel Orientation="Horizontal" Margin="4,6">
+                            <ui:SymbolIcon Symbol="Settings24" FontSize="18" />
+                            <TextBlock Text="General" Margin="14,0,0,0" FontSize="14" />
+                        </StackPanel>
+                    </ui:ListViewItem>
+                    <ui:ListViewItem Tag="Monitors" AutomationProperties.Name="Monitors">
+                        <StackPanel Orientation="Horizontal" Margin="4,6">
+                            <ui:SymbolIcon Symbol="Desktop24" FontSize="18" />
+                            <TextBlock Text="Monitors" Margin="14,0,0,0" FontSize="14" />
+                        </StackPanel>
+                    </ui:ListViewItem>
+                    <ui:ListViewItem Tag="Apps" AutomationProperties.Name="Apps">
+                        <StackPanel Orientation="Horizontal" Margin="4,6">
+                            <ui:SymbolIcon Symbol="Apps24" FontSize="18" />
+                            <TextBlock Text="Apps" Margin="14,0,0,0" FontSize="14" />
+                        </StackPanel>
+                    </ui:ListViewItem>
+                    <ui:ListViewItem Tag="About" AutomationProperties.Name="About">
+                        <StackPanel Orientation="Horizontal" Margin="4,6">
+                            <ui:SymbolIcon Symbol="Info24" FontSize="18" />
+                            <TextBlock Text="About" Margin="14,0,0,0" FontSize="14" />
+                        </StackPanel>
+                    </ui:ListViewItem>
+                </ui:ListView>
+            </Grid>
 
-                <!-- How it runs -->
-                <ui:Card Margin="0,16,0,0" Padding="16,12">
-                    <StackPanel>
-                        <Grid>
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <TextBlock Text="How it runs" FontSize="14" VerticalAlignment="Center" />
-                            <ComboBox x:Name="RunModeCombo" Grid.Column="1" MinWidth="330" SelectionChanged="RunModeCombo_SelectionChanged">
+            <ScrollViewer x:Name="PageScroller" Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <!-- Content fills the width up to a comfortable maximum and stays next to the navigation, like Settings. -->
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" MaxWidth="1860" /><ColumnDefinition Width="0" /></Grid.ColumnDefinitions>
+                <Grid x:Name="Pages" Margin="24,4,32,28" RequestBringIntoView="Page_RequestBringIntoView">
+
+                    <!-- ============================================================ General -->
+                    <StackPanel x:Name="PageGeneral">
+                        <TextBlock Style="{StaticResource PageTitle}" Text="General" />
+                        <TextBlock Style="{StaticResource Secondary}" FontSize="13" Margin="2,0,0,16"
+                                   Text="Opens each app's windows on the monitor you actually use that app on. It learns that by itself, so there's nothing you have to set up." />
+
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Power24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="How it runs" />
+                                    <TextBlock x:Name="RunModeHint" Style="{StaticResource Secondary}" />
+                                    <TextBlock x:Name="BackgroundStatusText" Style="{StaticResource Secondary}" FontWeight="SemiBold" Margin="0,4,0,0" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ComboBox x:Name="RunModeCombo" MinWidth="250" AutomationProperties.Name="How it runs" SelectionChanged="RunModeCombo_SelectionChanged">
                                 <ComboBoxItem Content="In the tray (catches every window)" Tag="Tray" />
-                                <ComboBoxItem Content="Tiny invisible helper, no tray icon" Tag="Helper" />
+                                <ComboBoxItem Content="Small background helper (no tray icon)" Tag="Helper" />
                                 <ComboBoxItem Content="Nothing in the background (shortcuts only)" Tag="LaunchOnly" />
                             </ComboBox>
-                        </Grid>
-                        <TextBlock x:Name="RunModeHint" Style="{StaticResource Secondary}" Margin="0,8,0,0" />
-                        <TextBlock x:Name="BackgroundStatusText" Style="{StaticResource Secondary}" Margin="0,4,0,0" FontWeight="SemiBold" />
-                    </StackPanel>
-                </ui:Card>
+                        </ui:CardControl>
 
-                <!-- Toggles -->
-                <ui:Card Margin="0,8,0,0" Padding="16,8">
-                    <StackPanel>
-                        <Grid Margin="0,6">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="Enabled" FontSize="14" />
-                                <TextBlock Style="{StaticResource Secondary}" Text="Move new windows to their app's monitor." />
-                            </StackPanel>
-                            <ui:ToggleSwitch x:Name="EnabledToggle" Grid.Column="1" Click="EnabledToggle_Click" />
-                        </Grid>
-                        <Separator Margin="0,4" />
-                        <Grid Margin="0,6">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="Learn automatically" FontSize="14" />
-                                <TextBlock x:Name="LearnHint" Style="{StaticResource Secondary}" Text="When you use an app on a monitor for a few seconds, that becomes its home. Only the window you're using counts." />
-                            </StackPanel>
-                            <ui:ToggleSwitch x:Name="LearnToggle" Grid.Column="1" Click="LearnToggle_Click" />
-                        </Grid>
-                        <Separator Margin="0,4" />
-                        <Grid Margin="0,6">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <StackPanel VerticalAlignment="Center">
-                                <TextBlock Text="Start with Windows" FontSize="14" />
-                                <TextBlock x:Name="StartupHint" Style="{StaticResource Secondary}" Text="Runs quietly in the tray when you sign in." />
-                            </StackPanel>
-                            <ui:ToggleSwitch x:Name="StartupToggle" Grid.Column="1" Click="StartupToggle_Click" />
-                        </Grid>
-                        <Separator Margin="0,4" />
-                        <Grid Margin="0,6">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <TextBlock Text="Apps it hasn't learned yet:" FontSize="14" VerticalAlignment="Center" />
-                            <ComboBox x:Name="UnknownCombo" Grid.Column="1" MinWidth="260" SelectionChanged="UnknownCombo_SelectionChanged">
+                        <TextBlock Style="{StaticResource SectionHeader}" Text="Placing windows" />
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=WindowNew24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Move new windows" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Open each new window on its app's monitor. Turn off to pause everything." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:ToggleSwitch x:Name="EnabledToggle" AutomationProperties.Name="Move new windows to their app's monitor" Click="EnabledToggle_Click" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Lightbulb24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Learn automatically" />
+                                    <TextBlock x:Name="LearnHint" Style="{StaticResource Secondary}" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:ToggleSwitch x:Name="LearnToggle" AutomationProperties.Name="Learn automatically" Click="LearnToggle_Click" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Window24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Apps it hasn't learned yet" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Where windows of apps without a monitor open." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ComboBox x:Name="UnknownCombo" MinWidth="250" AutomationProperties.Name="Apps it hasn't learned yet" SelectionChanged="UnknownCombo_SelectionChanged">
                                 <ComboBoxItem Content="Open on main monitor" />
                                 <ComboBoxItem Content="Leave where Windows puts them" />
                             </ComboBox>
-                        </Grid>
+                        </ui:CardControl>
+
+                        <TextBlock Style="{StaticResource SectionHeader}" Text="Startup" />
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Rocket24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Start with Windows" />
+                                    <TextBlock x:Name="StartupHint" Style="{StaticResource Secondary}" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:ToggleSwitch x:Name="StartupToggle" AutomationProperties.Name="Start with Windows" Click="StartupToggle_Click" />
+                        </ui:CardControl>
+
+                        <StackPanel x:Name="RecentPanel" Margin="0,22,0,0">
+                            <TextBlock Style="{StaticResource SectionHeader}" Margin="2,0,0,8" Text="Recent activity" />
+                            <ui:Card Padding="16,12">
+                                <TextBlock x:Name="LastActionText" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                            </ui:Card>
+                        </StackPanel>
                     </StackPanel>
-                </ui:Card>
 
-                <TextBlock x:Name="LastActionText" Style="{StaticResource Secondary}" Margin="2,10,0,0" />
-
-                <!-- Monitors -->
-                <TextBlock Style="{StaticResource SectionHeader}" Text="Your monitors" />
-                <ItemsControl x:Name="MonitorsList">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <ui:Card Margin="0,0,0,6" Padding="14,10" HorizontalContentAlignment="Stretch">
-                                <Grid>
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                    <StackPanel Orientation="Horizontal">
-                                        <ui:SymbolIcon Symbol="Desktop24" FontSize="22" Margin="0,0,14,0" VerticalAlignment="Center" />
-                                        <StackPanel VerticalAlignment="Center">
-                                            <TextBlock Text="{Binding Label}" FontSize="14" />
-                                            <TextBlock Text="{Binding Details}" Style="{StaticResource Secondary}" />
+                    <!-- ============================================================ Monitors -->
+                    <StackPanel x:Name="PageMonitors" Visibility="Collapsed">
+                        <TextBlock Style="{StaticResource PageTitle}" Text="Monitors" />
+                        <TextBlock Style="{StaticResource Secondary}" FontSize="13" Margin="2,0,0,16"
+                                   Text="Give your monitors your own names and numbers, and choose the main monitor (where the taskbar clock and Start menu are, and where apps it hasn't learned yet open)." />
+                        <ItemsControl x:Name="MonitorsList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <ui:CardControl Icon="{ui:SymbolIcon Symbol=Desktop24}">
+                                        <ui:CardControl.Header>
+                                            <StackPanel Margin="0,0,16,0">
+                                                <TextBlock Style="{StaticResource CardTitle}" Text="{Binding Label}" />
+                                                <TextBlock Style="{StaticResource Secondary}" Text="{Binding Details}" />
+                                            </StackPanel>
+                                        </ui:CardControl.Header>
+                                        <StackPanel Orientation="Horizontal">
+                                            <ui:Button Content="Name &amp; number" Click="RenameMonitor_Click"
+                                                       AutomationProperties.Name="{Binding Name, StringFormat='Name and number for {0}'}"
+                                                       ToolTip="Give this monitor your own name and number, for example &quot;2 · TV&quot;" />
+                                            <ui:Button Content="Make main" Margin="8,0,0,0" Click="MakeMain_Click"
+                                                       AutomationProperties.Name="{Binding Name, StringFormat='Make {0} the main monitor'}"
+                                                       Visibility="{Binding IsPrimary, Converter={StaticResource HideWhenTrue}}"
+                                                       ToolTip="Make this the main monitor in Windows (taskbar clock, Start menu, and where new apps open)" />
                                         </StackPanel>
-                                    </StackPanel>
-                                    <!-- Shown on every monitor except the current main one -->
-                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                        <ui:Button Content="Name &amp; number" Click="RenameMonitor_Click"
-                                                   ToolTip="Give this monitor your own name and number, e.g. &quot;2 · TV&quot;" />
-                                        <!-- Shown on every monitor except the current main one -->
-                                        <ui:Button Content="Make main" Margin="8,0,0,0" Click="MakeMain_Click"
-                                                   Visibility="{Binding IsPrimary, Converter={StaticResource HideWhenTrue}}"
-                                                   ToolTip="Make this the main monitor in Windows (taskbar, Start menu, and where new apps open)" />
-                                    </StackPanel>
+                                    </ui:CardControl>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock Style="{StaticResource SectionHeader}" Text="Related settings" />
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=LinkSquare24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Display" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Arrange monitors, resolution, scale and HDR in Windows Settings. Windows keeps its own display numbers there." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button Content="Open" Click="OpenDisplaySettings_Click" AutomationProperties.Name="Open Windows display settings" />
+                        </ui:CardControl>
+                    </StackPanel>
+
+                    <!-- ============================================================ Apps -->
+                    <StackPanel x:Name="PageApps" Visibility="Collapsed">
+                        <TextBlock Style="{StaticResource PageTitle}" Text="Apps" />
+                        <TextBlock x:Name="ListTip" Style="{StaticResource Secondary}" FontSize="13" Margin="2,0,0,16"
+                                   Text="You don't need to set anything here: just use your apps, and each one is learned after a few seconds on a monitor. Select an app only if you want to choose its monitor yourself." />
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <ui:TextBox x:Name="SearchBox" PlaceholderText="Search apps" TextChanged="SearchBox_TextChanged"
+                                        AutomationProperties.Name="Search apps" Icon="{ui:SymbolIcon Search24}" ClearButtonEnabled="True" />
+                            <ui:Button Grid.Column="1" Content="Refresh" Margin="8,0,0,0" VerticalAlignment="Stretch"
+                                       Click="RefreshApps_Click" ToolTip="Update the list of open apps now" Icon="{ui:SymbolIcon ArrowClockwise24}" />
+                        </Grid>
+
+                        <Grid x:Name="AppsLayout">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition x:Name="DetailColumn" Width="0" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+
+                            <ui:Card Padding="0" VerticalAlignment="Top">
+                                <Grid>
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                    <Grid Margin="16,10,16,6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="5*" /><ColumnDefinition Width="5*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="App" FontWeight="SemiBold" />
+                                        <TextBlock Grid.Column="1" Text="Opens on" FontWeight="SemiBold" />
+                                    </Grid>
+                                    <Grid Grid.Row="1">
+                                        <ui:ListView x:Name="AppsList" MinHeight="120" Margin="4,0,4,4" SelectionMode="Single"
+                                                     HorizontalContentAlignment="Stretch" AutomationProperties.Name="Apps and where they open"
+                                                     KeyDown="AppsList_KeyDown"
+                                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                                     RequestBringIntoView="AppsList_RequestBringIntoView"
+                                                     SelectionChanged="AppsList_SelectionChanged">
+                                            <ui:ListView.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="8,4">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="5*" /><ColumnDefinition Width="5*" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <StackPanel Margin="0,0,8,0">
+                                                            <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                                                            <TextBlock Text="{Binding Detail}" Style="{StaticResource Secondary}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                                        </StackPanel>
+                                                        <StackPanel Grid.Column="1" ToolTip="{Binding OpensOn}">
+                                                            <TextBlock Text="{Binding OpensOn}" TextTrimming="CharacterEllipsis" />
+                                                            <TextBlock Text="{Binding Source}" Style="{StaticResource Secondary}" TextWrapping="NoWrap" />
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ui:ListView.ItemTemplate>
+                                        </ui:ListView>
+                                        <TextBlock x:Name="EmptyText" Style="{StaticResource Secondary}" Margin="20,16" FontSize="13" />
+                                    </Grid>
                                 </Grid>
                             </ui:Card>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
 
-                <!-- Learned apps -->
-                <Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                    <TextBlock Style="{StaticResource SectionHeader}" Text="Apps and where they open" />
-                    <ui:Button Grid.Column="1" Content="Refresh" VerticalAlignment="Bottom" Margin="0,0,0,6"
-                               Click="RefreshApps_Click" ToolTip="Update the list of open apps now">
-                        <ui:Button.Icon><ui:SymbolIcon Symbol="ArrowClockwise24" /></ui:Button.Icon>
-                    </ui:Button>
-                </Grid>
-                <ui:Card Padding="0">
-                    <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-                        <Grid Margin="16,10,16,6">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" /><ColumnDefinition Width="220" /><ColumnDefinition Width="100" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="App" FontWeight="SemiBold" />
-                            <TextBlock Grid.Column="1" Text="Opens on" FontWeight="SemiBold" />
-                            <TextBlock Grid.Column="2" Text="Source" FontWeight="SemiBold" />
+                            <!-- Selected app: beside the list when wide, below it when narrow -->
+                            <StackPanel x:Name="DetailPane" Grid.Row="1" Margin="0,8,0,0">
+                                <ui:Card x:Name="SelectionPanel" Padding="16,14" IsEnabled="False">
+                                    <StackPanel>
+                                        <TextBlock x:Name="SelectedAppName" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" Text="No app selected" />
+                                        <TextBlock x:Name="SelectedAppDetail" Style="{StaticResource Secondary}" Margin="0,2,0,12" />
+                                        <TextBlock Text="Open it on" Margin="0,0,0,6" />
+                                        <ComboBox x:Name="TargetCombo" HorizontalAlignment="Stretch" AutomationProperties.Name="Open it on" SelectionChanged="TargetCombo_SelectionChanged" />
+                                        <!-- Only for "Where I used it last": which monitors the app may open on -->
+                                        <StackPanel x:Name="AllowedPanel" Margin="0,12,0,0" Visibility="Collapsed">
+                                            <TextBlock Style="{StaticResource Secondary}" FontSize="13"
+                                                       Text="It opens on whichever of these monitors you used it on last:" />
+                                            <ItemsControl x:Name="AllowedList" Margin="0,6,0,0">
+                                                <ItemsControl.ItemsPanel>
+                                                    <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                                                </ItemsControl.ItemsPanel>
+                                            </ItemsControl>
+                                            <TextBlock x:Name="LastUsedLaunchOnlyNote" Style="{StaticResource Secondary}" Margin="0,4,0,0" Visibility="Collapsed"
+                                                       Text="Note: with nothing running in the background, Monitor Window Control can't see where you use the app, so it opens where it was used when you last changed this." />
+                                        </StackPanel>
+                                        <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                            <ui:Button Content="Save" Appearance="Primary" MinWidth="96" Click="ChangeMonitor_Click" />
+                                            <ui:Button x:Name="ForgetButton" Content="Forget" Margin="8,0,0,0" Click="Forget_Click"
+                                                       AutomationProperties.Name="Forget this app" ToolTip="Forget this app's monitor (Delete key)" />
+                                        </StackPanel>
+                                        <!-- Launch shortcut (the way to use "nothing in the background"; works in every mode) -->
+                                        <Separator Margin="0,14,0,10" />
+                                        <TextBlock x:Name="ShortcutStatus" Style="{StaticResource Secondary}" FontSize="13" TextWrapping="Wrap" Margin="0,0,0,8" />
+                                        <ui:Button x:Name="ShortcutButton" Content="Create launch shortcut" Click="Shortcut_Click" Icon="{ui:SymbolIcon Pin24}" />
+                                    </StackPanel>
+                                </ui:Card>
+                                <TextBlock Style="{StaticResource Secondary}" Margin="2,8,0,0"
+                                           Text="Select an app, choose where it opens, and press Save. Its open windows move there right away, and learning won't change your choice." />
+                            </StackPanel>
                         </Grid>
-                        <Grid Grid.Row="1">
-                            <ui:ListView x:Name="AppsList" MinHeight="120" Margin="4,0,4,4" SelectionMode="Single"
-                                      HorizontalContentAlignment="Stretch"
-                                      PreviewMouseWheel="AppsList_PreviewMouseWheel"
-                                      RequestBringIntoView="AppsList_RequestBringIntoView"
-                                      SelectionChanged="AppsList_SelectionChanged">
-                                <ui:ListView.ItemTemplate>
-                                    <DataTemplate>
-                                        <Grid Margin="8,4">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" /><ColumnDefinition Width="220" /><ColumnDefinition Width="100" />
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel>
-                                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
-                                                <TextBlock Text="{Binding Detail}" Style="{StaticResource Secondary}" TextTrimming="CharacterEllipsis" />
-                                            </StackPanel>
-                                            <TextBlock Grid.Column="1" Text="{Binding OpensOn}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                                            <TextBlock Grid.Column="2" Text="{Binding Source}" VerticalAlignment="Center" Style="{StaticResource Secondary}" />
-                                        </Grid>
-                                    </DataTemplate>
-                                </ui:ListView.ItemTemplate>
-                            </ui:ListView>
-                            <TextBlock x:Name="EmptyText" Style="{StaticResource Secondary}" Margin="20,16" FontSize="13"
-                                       Text="No apps yet. Open an app and it shows up here, or just use your apps: after a few seconds on a monitor, an app is learned." />
-                        </Grid>
-                    </Grid>
-                </ui:Card>
 
-                <!-- Selected app -->
-                <ui:Card x:Name="SelectionPanel" Margin="0,8,0,0" Padding="16,12" IsEnabled="False">
-                    <StackPanel>
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="Open it on:" VerticalAlignment="Center" Margin="0,0,10,0" />
-                            <ComboBox x:Name="TargetCombo" Grid.Column="1" MinWidth="200" SelectionChanged="TargetCombo_SelectionChanged" />
-                            <ui:Button Grid.Column="2" Content="Save" Appearance="Primary" Margin="10,0,0,0" MinWidth="80" Click="ChangeMonitor_Click" />
-                            <ui:Button x:Name="ForgetButton" Grid.Column="3" Content="Forget" Margin="8,0,0,0" Click="Forget_Click" />
-                        </Grid>
-                        <!-- Only for "Where I used it last": which monitors the app may open on -->
-                        <StackPanel x:Name="AllowedPanel" Margin="0,12,0,0" Visibility="Collapsed">
-                            <TextBlock Style="{StaticResource Secondary}" FontSize="13"
-                                       Text="It opens on whichever of these monitors you used it on last:" />
-                            <ItemsControl x:Name="AllowedList" Margin="0,6,0,0">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
-                            </ItemsControl>
-                            <TextBlock x:Name="LastUsedLaunchOnlyNote" Style="{StaticResource Secondary}" Margin="0,4,0,0" Visibility="Collapsed"
-                                       Text="Note: with nothing running in the background, Monitor Window Control can't see where you use the app, so it opens where it was used when you last changed this." />
-                        </StackPanel>
-                        <!-- Launch shortcut (the way to use "nothing in the background"; works in every mode) -->
-                        <Separator Margin="0,12,0,8" />
-                        <Grid>
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <TextBlock x:Name="ShortcutStatus" Style="{StaticResource Secondary}" FontSize="13" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,10,0" />
-                            <ui:Button x:Name="ShortcutButton" Grid.Column="1" Content="Create launch shortcut" Click="Shortcut_Click" />
-                        </Grid>
+                        <ui:Button x:Name="ForgetAllButton" Content="Forget all apps…" Margin="0,16,0,0" Click="ForgetAll_Click" Icon="{ui:SymbolIcon Delete24}" />
                     </StackPanel>
-                </ui:Card>
-                <TextBlock x:Name="SelectionHint" Style="{StaticResource Secondary}" Margin="2,6,0,0"
-                           Text="Select an app above (apps that are open right now are listed too), choose where it opens, and press Save. Its open windows move there right away, and learning won't change your choice." />
 
-                <StackPanel Orientation="Horizontal" Margin="0,20,0,0">
-                    <ui:Button Content="Forget all…" Click="ForgetAll_Click" />
-                    <ui:Button Content="Open log" Margin="8,0,0,0" Click="OpenLog_Click" />
-                </StackPanel>
-            </StackPanel>
-        </ScrollViewer>
+                    <!-- ============================================================ About -->
+                    <StackPanel x:Name="PageAbout" Visibility="Collapsed">
+                        <TextBlock Style="{StaticResource PageTitle}" Text="About" />
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Info24}" Margin="0,10,0,4">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Monitor Window Control" />
+                                    <TextBlock x:Name="VersionText" Style="{StaticResource Secondary}" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button Content="Project page" Click="OpenProject_Click" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=DocumentText24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Activity log" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Every window it moved, every app it learned, and every change you made, with the time." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button Content="Open" Click="OpenLog_Click" AutomationProperties.Name="Open activity log" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Folder24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Settings folder" />
+                                    <TextBlock x:Name="SettingsFolderText" Style="{StaticResource Secondary}" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button Content="Open" Click="OpenFolder_Click" AutomationProperties.Name="Open settings folder" />
+                        </ui:CardControl>
+                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=Shield24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Privacy" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Collects nothing and never connects to the internet. Everything stays on this PC." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button Content="Privacy statement" Click="OpenPrivacy_Click" />
+                        </ui:CardControl>
+                        <ui:CardControl x:Name="ExitCard" Icon="{ui:SymbolIcon Symbol=SignOut24}">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Exit" />
+                                    <TextBlock Style="{StaticResource Secondary}" Text="Close Monitor Window Control completely. New windows aren't placed until you open it again." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button x:Name="ExitButton" Content="Exit" Click="Exit_Click" />
+                        </ui:CardControl>
+                    </StackPanel>
+                </Grid>
+              </Grid>
+            </ScrollViewer>
+        </Grid>
     </Grid>
 </ui:FluentWindow>

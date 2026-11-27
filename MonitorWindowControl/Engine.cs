@@ -40,6 +40,7 @@ public sealed class Engine : IDisposable
     private DateTime _lastMonitorChangeUtc = DateTime.MinValue;
 
     private string? _streakKey, _streakDevice;
+    private string? _learnedKey, _learnedDevice; // what the current streak already taught (don't redo it every 2 s)
     private int _streakCount, _tickCount;
     private bool _started, _disposed, _learning;
 
@@ -63,6 +64,7 @@ public sealed class Engine : IDisposable
     /// <summary>Raised when an app window appears or one seen this session closes (so a list of open apps can update).</summary>
     public event Action? AppWindowsChanged;
     private readonly HashSet<IntPtr> _appWindows = new();
+    private readonly HashSet<IntPtr> _fallbackPlaced = new(); // put on main only because its monitor isn't connected
 
     private sealed class Pending
     {
@@ -71,6 +73,7 @@ public sealed class Engine : IDisposable
         public bool Verify;
         public string TargetDevice = "";
         public string AppKey = "";
+        public string FromDevice = "";   // the monitor it was on before we moved it
     }
 
     public Engine(IEngineHost host)
@@ -100,6 +103,7 @@ public sealed class Engine : IDisposable
             Save();
         }
         _started = true;
+        if (importLegacy) ForgetLearnedOneOffApps();
         Log.Write($"{who} started (mode={Settings.RunMode}, enabled={Settings.Enabled}, learn={Settings.LearnAutomatically}, " +
                   $"unknown apps={(Settings.MoveUnknownToMain ? "main monitor" : "leave")}, admin={_selfElevated}).");
         return !existed;
@@ -116,10 +120,10 @@ public sealed class Engine : IDisposable
         {
             // Tray app and background helper: only one of them may place windows at a time.
             // (Launch-shortcut sessions don't claim this; they only place their own app's new window.)
-            _activeMutex = new Mutex(true, ActiveMutexName, out bool createdNew);
+            _activeMutex = Native.TryCreateOwnedMutex(ActiveMutexName, out bool createdNew);
             if (!createdNew)
             {
-                _activeMutex.Dispose(); _activeMutex = null;
+                _activeMutex?.Dispose(); _activeMutex = null;
                 return false;
             }
         }
@@ -148,7 +152,7 @@ public sealed class Engine : IDisposable
     {
         _placeTimer.Stop(); _learnTimer.Stop();
         if (_hook != IntPtr.Zero) { Native.UnhookWinEvent(_hook); _hook = IntPtr.Zero; }
-        _pending.Clear(); _handled.Clear(); _appWindows.Clear(); ResetStreak();
+        _pending.Clear(); _handled.Clear(); _appWindows.Clear(); _fallbackPlaced.Clear(); ResetStreak();
         ReleaseActiveMutex();
     }
 
@@ -160,12 +164,7 @@ public sealed class Engine : IDisposable
     }
 
     /// <summary>True if some process (this one or another) is currently watching windows.</summary>
-    public static bool AnyProcessActive()
-    {
-        if (!Mutex.TryOpenExisting(ActiveMutexName, out var m)) return false;
-        m.Dispose();
-        return true;
-    }
+    public static bool AnyProcessActive() => Native.NamedMutexExists(ActiveMutexName);
 
     // ------------------------------------------------------------------ settings shared between processes
 
@@ -210,7 +209,7 @@ public sealed class Engine : IDisposable
         // Your numbers decide the order (numbered first, 1, 2, 3…); otherwise main first, then left to right.
         list = list.OrderBy(m => m.Number ?? int.MaxValue).ThenByDescending(m => m.IsPrimary).ThenBy(m => m.Bounds.Left).ToList();
         _monitors = list;
-        string sig = string.Join("|", list.Select(m => $"{m.DeviceName}={m.Name}{(m.IsPrimary ? "*" : "")}@{m.Bounds}"));
+        string sig = string.Join("|", list.Select(m => $"{m.DeviceName}={m.Name}{(m.IsPrimary ? "*" : "")}@{m.Bounds}/{m.Work}"));
         if (sig == _monitorSignature) return;
         if (_monitorSignature.Length > 0) _lastMonitorChangeUtc = DateTime.UtcNow; // (not the first read at startup)
         _monitorSignature = sig;
@@ -222,22 +221,29 @@ public sealed class Engine : IDisposable
         device == null ? null : _monitors.FirstOrDefault(m => string.Equals(m.DeviceName, device, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>The connected monitor an app rule points to, or null if it isn't connected.</summary>
-    public MonitorInfo? Resolve(AppRule rule)
-    {
-        // Prefer the model name: survives Windows renumbering displays when the TV is switched on/off.
-        if (!string.IsNullOrEmpty(rule.MonitorName))
-        {
-            var byName = _monitors.Where(m => m.FriendlyName == rule.MonitorName).ToList();
-            if (byName.Count == 1) return byName[0];
-        }
-        return MonitorByDevice(rule.MonitorDevice);
-    }
+    public MonitorInfo? Resolve(AppRule rule) => FindMonitor(rule.MonitorName, rule.MonitorDevice);
 
-    private bool Matches(MonitorRef r, MonitorInfo m)
+    private bool Matches(MonitorRef r, MonitorInfo m) =>
+        string.Equals(FindMonitor(r.Name, r.Device)?.DeviceName, m.DeviceName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Finds a saved monitor among the connected ones. The model name wins: it survives Windows renumbering displays
+    /// (a TV switched on or off). The saved device ("DISPLAY3") is only trusted when no name was saved, when Windows
+    /// couldn't read a model name, or for two identical models; otherwise a monitor that isn't connected stays
+    /// "not connected" instead of being confused with whichever screen now has its number.
+    /// </summary>
+    private MonitorInfo? FindMonitor(string? name, string? device)
     {
-        if (!string.IsNullOrEmpty(r.Name) && _monitors.Count(x => x.FriendlyName == r.Name) == 1)
-            return m.FriendlyName == r.Name;
-        return string.Equals(r.Device, m.DeviceName, StringComparison.OrdinalIgnoreCase);
+        var byDevice = MonitorByDevice(device);
+        if (string.IsNullOrEmpty(name)) return byDevice;
+        var byName = _monitors.Where(m => m.FriendlyName == name).ToList();
+        if (byName.Count == 1) return byName[0];
+        if (byDevice == null) return null;
+        if (byName.Count > 1) return byDevice;
+        static bool Generic(string n) => n.StartsWith("Display ", StringComparison.Ordinal);
+        static string Model(string n) { int i = n.LastIndexOf(" (DISPLAY", StringComparison.Ordinal); return i > 0 ? n[..i] : n; }
+        if (Generic(name) || Generic(byDevice.FriendlyName)) return byDevice;          // no model name to go by
+        return Model(byDevice.FriendlyName) == Model(name) ? byDevice : null;          // same model, renumbered
     }
 
     /// <summary>For "Where I used it last" apps: is this one of the monitors it may open on?</summary>
@@ -274,6 +280,7 @@ public sealed class Engine : IDisposable
         {
             _handled.Remove(hwnd);
             _pending.Remove(hwnd);
+            _fallbackPlaced.Remove(hwnd);
             if (_appWindows.Remove(hwnd)) AppWindowsChanged?.Invoke();
             return;
         }
@@ -388,6 +395,12 @@ public sealed class Engine : IDisposable
         }
         if (target == null) return;
 
+        // The taskbar may have moved or changed size since monitors were last read: use the current work area.
+        string targetDevice = target.DeviceName;
+        RefreshMonitors();
+        target = MonitorByDevice(targetDevice);
+        if (target == null) return;
+
         var current = MonitorOfWindow(hwnd);
         if (current != null && current.DeviceName == target.DeviceName) return; // already home
 
@@ -404,12 +417,13 @@ public sealed class Engine : IDisposable
         string from = current?.Name ?? "?";
         if (ok)
         {
+            if (reason.Contains("isn't connected")) _fallbackPlaced.Add(hwnd);
             Note($"Moved {app.DisplayName} from {from} to {target.Name} ({reason}).", $"{app.Key} \"{title}\"");
             // Check once more shortly: some apps restore their saved position after showing.
             _pending[hwnd] = new Pending
             {
                 Verify = true, Due = DateTime.UtcNow.AddMilliseconds(VerifyDelayMs),
-                TargetDevice = target.DeviceName, AppKey = app.Key,
+                TargetDevice = target.DeviceName, AppKey = app.Key, FromDevice = current?.DeviceName ?? "",
             };
         }
         else
@@ -426,6 +440,8 @@ public sealed class Engine : IDisposable
         var target = MonitorByDevice(p.TargetDevice);
         var current = MonitorOfWindow(hwnd);
         if (target == null || current == null || current.DeviceName == target.DeviceName) return;
+        // Apps that restore their saved position jump back to where they opened. Anywhere else, you moved it: leave it.
+        if (!string.Equals(current.DeviceName, p.FromDevice, StringComparison.OrdinalIgnoreCase)) return;
         if (WindowMover.MoveTo(hwnd, target))
             Log.Write($"{p.AppKey} moved itself back to {current.Name}; moved it to {target.Name} again.");
     }
@@ -434,7 +450,11 @@ public sealed class Engine : IDisposable
 
     private void LearnTick()
     {
-        if (++_tickCount % 30 == 0) _handled.RemoveWhere(h => !Native.IsWindow(h)); // safety net, ~every minute
+        if (++_tickCount % 30 == 0) // safety net, ~every minute
+        {
+            _handled.RemoveWhere(h => !Native.IsWindow(h));
+            _fallbackPlaced.RemoveWhere(h => !Native.IsWindow(h));
+        }
         ReloadIfChanged(); // pick up changes made in the settings window / by the helper
         if (!_learning) return;
 
@@ -460,10 +480,15 @@ public sealed class Engine : IDisposable
         if (app.Key == _streakKey && mon.DeviceName == _streakDevice) _streakCount++;
         else { _streakKey = app.Key; _streakDevice = mon.DeviceName; _streakCount = 1; }
 
-        if (_streakCount >= LearnChecksNeeded) Learn(app, mon, fg);
+        // Learn once per streak: using the same app on the same monitor for an hour doesn't redo it every 2 s.
+        if (_streakCount >= LearnChecksNeeded && (app.Key != _learnedKey || mon.DeviceName != _learnedDevice))
+        {
+            _learnedKey = app.Key; _learnedDevice = mon.DeviceName;
+            Learn(app, mon, fg);
+        }
     }
 
-    private void ResetStreak() { _streakKey = null; _streakDevice = null; _streakCount = 0; }
+    private void ResetStreak() { _streakKey = null; _streakDevice = null; _streakCount = 0; _learnedKey = null; _learnedDevice = null; }
 
     private void Learn(AppIdentity app, MonitorInfo mon, IntPtr hwnd)
     {
@@ -471,6 +496,8 @@ public sealed class Engine : IDisposable
         ReloadIfChanged();
         var rule = Settings.Find(app.Key);
         if (rule != null) rule = RefreshRuleDetails(rule, app, hwnd);
+        // It's on the main monitor only because its own monitor is off: that's not a choice. (Drag it elsewhere and it is.)
+        if (_fallbackPlaced.Contains(hwnd) && mon.DeviceName == MainMonitor?.DeviceName) return;
         if (rule != null && rule.FollowLastUsed)
         {
             // Remember the last monitor you used it on, if it's one of the monitors you picked for it.
@@ -484,6 +511,7 @@ public sealed class Engine : IDisposable
         }
         if (!Settings.LearnAutomatically) return;
         if (rule != null && (rule.Pinned || rule.NeverMove)) return;
+        if (rule == null && WindowInfo.IsOneOffApp(app.Key)) return; // setup / uninstall / update programs
         if (rule != null && Resolve(rule)?.DeviceName == mon.DeviceName)
         {
             if (rule.MonitorDevice != mon.DeviceName || rule.MonitorName != mon.FriendlyName)
@@ -495,7 +523,9 @@ public sealed class Engine : IDisposable
 
         string? old = rule == null ? null : (rule.MonitorName ?? rule.MonitorDevice);
         if (rule == null) { rule = new AppRule { Key = app.Key, LaunchTarget = WindowInfo.GetLaunchTarget(hwnd) }; Settings.Apps.Add(rule); }
-        rule.DisplayName = app.DisplayName;
+        bool keepName = app.Key.StartsWith(WindowInfo.WebAppKeyPrefix, StringComparison.Ordinal)
+                        && !string.IsNullOrWhiteSpace(rule.DisplayName) && rule.DisplayName != rule.Key;
+        if (!keepName) rule.DisplayName = app.DisplayName;
         rule.MonitorDevice = mon.DeviceName;
         rule.MonitorName = mon.FriendlyName;
         rule.UpdatedUtc = DateTime.UtcNow;
@@ -616,21 +646,39 @@ public sealed class Engine : IDisposable
             return "Windows didn't return the settings of that monitor.";
         int dx = dm.dmPositionX, dy = dm.dmPositionY;
 
-        // Queue the change for every display (new main first), then apply them all at once.
+        // Every display's current settings (new main first).
+        var displays = new List<(MonitorInfo m, Native.DEVMODE original)>();
         foreach (var m in _monitors.OrderByDescending(m => m.DeviceName == target.DeviceName))
         {
             var d = NewDevMode();
-            if (!Native.EnumDisplaySettings(m.DeviceName, Native.ENUM_CURRENT_SETTINGS, ref d)) continue;
-            d.dmPositionX -= dx; d.dmPositionY -= dy;
-            d.dmFields = Native.DM_POSITION;
-            uint flags = Native.CDS_UPDATEREGISTRY | Native.CDS_NORESET
-                         | (m.DeviceName == target.DeviceName ? Native.CDS_SET_PRIMARY : 0);
+            if (!Native.EnumDisplaySettings(m.DeviceName, Native.ENUM_CURRENT_SETTINGS, ref d))
+                return $"Windows didn't return the settings of {m.Name}, so nothing was changed.";
+            displays.Add((m, d));
+        }
+
+        Native.DEVMODE Shifted(Native.DEVMODE d) { d.dmPositionX -= dx; d.dmPositionY -= dy; d.dmFields = Native.DM_POSITION; return d; }
+        uint PrimaryFlag(MonitorInfo m, string primary) => m.DeviceName == primary ? Native.CDS_SET_PRIMARY : 0;
+
+        // Queue the change for every display, then apply them all at once. (A CDS_TEST pre-check can't be used:
+        // Windows judges each display on its own and rejects moving the current main display away from 0,0.)
+        foreach (var (m, original) in displays)
+        {
+            var d = Shifted(original);
+            uint flags = Native.CDS_UPDATEREGISTRY | Native.CDS_NORESET | PrimaryFlag(m, target.DeviceName);
             int r = Native.ChangeDisplaySettingsEx(m.DeviceName, ref d, IntPtr.Zero, flags, IntPtr.Zero);
             if (r != Native.DISP_CHANGE_SUCCESSFUL)
             {
-                Native.ChangeDisplaySettingsEx(null, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero); // apply whatever is queued
-                Log.Write($"Could not make {target.Name} the main monitor: Windows said {r} for {m.DeviceName}.");
-                return $"Windows refused the change (code {r}).";
+                // Put the queued displays back where they were (and the old main back as main), so nothing is half-changed.
+                string oldMain = MainMonitor?.DeviceName ?? "";
+                foreach (var (m2, o2) in displays)
+                {
+                    var back = o2; back.dmFields = Native.DM_POSITION;
+                    Native.ChangeDisplaySettingsEx(m2.DeviceName, ref back, IntPtr.Zero,
+                        Native.CDS_UPDATEREGISTRY | Native.CDS_NORESET | PrimaryFlag(m2, oldMain), IntPtr.Zero);
+                }
+                Native.ChangeDisplaySettingsEx(null, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero);
+                Log.Write($"Could not make {target.Name} the main monitor: Windows said {r} for {m.DeviceName}. The old layout was kept.");
+                return $"Windows refused the change for {m.Name} (code {r}). Your monitors were left as they were.";
             }
         }
         int apply = Native.ChangeDisplaySettingsEx(null, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero);
@@ -780,6 +828,19 @@ public sealed class Engine : IDisposable
         return moved;
     }
 
+    /// <summary>Older versions also learned installers and uninstallers; drop those (never ones you set yourself).</summary>
+    private void ForgetLearnedOneOffApps()
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var junk = Settings.Apps.Where(a => !a.Pinned && !a.NeverMove && !a.FollowLastUsed && a.ShortcutFile == null
+                                            && WindowInfo.IsOneOffApp(a.Key)).ToList();
+        if (junk.Count == 0) return;
+        foreach (var a in junk) Settings.Apps.Remove(a);
+        Save();
+        Log.Write("Removed learned setup/uninstall programs: " + string.Join(", ", junk.Select(a => a.Key)));
+    }
+
     public void Forget(string key)
     {
         using var _lock = SettingsStore.Lock();
@@ -834,9 +895,22 @@ internal static class WindowMover
                && r.Left <= b.Left && r.Top <= b.Top && r.Right >= b.Right && r.Bottom >= b.Bottom;
     }
 
+    /// <summary>
+    /// True if the window's app answers within half a second. Moving a window waits for its app, so a busy app
+    /// (still loading) would otherwise freeze Monitor Window Control too. Windows of this process always count.
+    /// </summary>
+    public static bool Responds(IntPtr hwnd)
+    {
+        Native.GetWindowThreadProcessId(hwnd, out uint pid);
+        if (pid == (uint)Environment.ProcessId) return true;
+        return Native.SendMessageTimeout(hwnd, 0 /* WM_NULL */, IntPtr.Zero, IntPtr.Zero,
+                   Native.SMTO_ABORTIFHUNG | Native.SMTO_BLOCK, 500, out _) != IntPtr.Zero;
+    }
+
     /// <summary>Centers the window on the target's work area (size clamped to fit). Keeps it maximized if it was.</summary>
     public static bool MoveTo(IntPtr hwnd, MonitorInfo target)
     {
+        if (!Responds(hwnd)) return false;
         const uint flags = Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_NOOWNERZORDER;
         bool wasMaximized = Native.IsZoomed(hwnd);
         if (wasMaximized) Native.ShowWindow(hwnd, Native.SW_RESTORE);

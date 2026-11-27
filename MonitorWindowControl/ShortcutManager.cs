@@ -22,7 +22,9 @@ public static class ShortcutManager
         if (name.EndsWith(" (Store app)", StringComparison.Ordinal)) name = name[..^" (Store app)".Length];
         if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
         foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, ' ');
-        return name.Trim().Length == 0 ? "App" : name.Trim();
+        name = name.Trim();
+        if (name.Length > 60) name = name[..60].TrimEnd() + "…"; // long Store-app titles would break the path
+        return name.Length == 0 ? "App" : name;
     }
 
     /// <summary>

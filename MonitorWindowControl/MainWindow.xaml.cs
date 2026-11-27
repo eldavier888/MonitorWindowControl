@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -21,8 +20,11 @@ public sealed class HideWhenTrueConverter : System.Windows.Data.IValueConverter
 }
 
 /// <summary>One row: a saved app (learned / set by you), or an app that's open right now but not saved yet.</summary>
-public sealed record AppRow(string Key, string Name, string Detail, string OpensOn, string Source,
-                            bool IsSaved, string? CurrentDevice);
+public sealed record AppRow(string Key, string Name, string Detail, string OpensOn, string Source, string? CurrentDevice)
+{
+    /// <summary>What Narrator and other screen readers say for the row.</summary>
+    public override string ToString() => $"{Name}, opens on {OpensOn}, {Source}";
+}
 
 public partial class MainWindow : FluentWindow
 {
@@ -47,15 +49,119 @@ public partial class MainWindow : FluentWindow
         _openAppsTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
         _openAppsTimer.Tick += (_, _) =>
         {
-            if (!_engine.ReloadIfChanged()) RefreshAppList(background: true); // a reload refreshes everything itself
-            BackgroundStatusText.Text = _app.BackgroundStatus();
+            try
+            {
+                if (!_engine.ReloadIfChanged()) RefreshAppList(background: true); // a reload refreshes everything itself
+                BackgroundStatusText.Text = _app.BackgroundStatus();
+            }
+            catch (Exception ex) { Log.Write("Unexpected error (window refresh): " + ex); }
         };
         _openAppsTimer.Start();
         // In tray mode the engine sees app windows open and close: update the list right away (debounced).
         _appsChangedDebounce = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
-        _appsChangedDebounce.Tick += (_, _) => { _appsChangedDebounce.Stop(); RefreshAppList(background: true); };
+        _appsChangedDebounce.Tick += (_, _) =>
+        {
+            _appsChangedDebounce.Stop();
+            try { RefreshAppList(background: true); } catch (Exception ex) { Log.Write("Unexpected error (app list): " + ex); }
+        };
         _engine.AppWindowsChanged += OnAppWindowsChanged;
+        SizeChanged += (_, _) => ApplyLayout();
+        PageScroller.SizeChanged += (_, _) => FitAppsList();
+        // A closed drop-down must never change its value when you scroll the page over it (WPF does that by default
+        // for a focused ComboBox — scrolling past "How it runs" could switch the mode).
+        foreach (var combo in new[] { RunModeCombo, UnknownCombo, TargetCombo })
+            combo.PreviewMouseWheel += (s, e) =>
+            {
+                if (((ComboBox)s).IsDropDownOpen) return;
+                e.Handled = true;
+                PageScroller.ScrollToVerticalOffset(PageScroller.VerticalOffset - e.Delta);
+            };
+        PreviewKeyDown += (_, _) => _lastKeyTick = Environment.TickCount;
+        Loaded += (_, _) => PageScroller.ScrollToTop();
+        VersionText.Text = $"Version {AppVersion} · free and open source (MIT licence)";
+        SettingsFolderText.Text = Paths.Dir;
+        NavList.SelectedIndex = 0;
         Refresh();
+    }
+
+    private bool? _wide;
+    private int _lastKeyTick = int.MinValue / 2;
+
+    private bool? _compactNav;
+
+    /// <summary>
+    /// Adapts to the window like Windows Settings: a narrow window shows the navigation as icons only; a wide one
+    /// (16:9, 21:9, 32:9 maximized…) puts the selected app's options beside the list instead of below it, so nothing
+    /// is stretched across empty space.
+    /// </summary>
+    private void ApplyLayout()
+    {
+        bool compact = ActualWidth < 760;
+        if (_compactNav != compact)
+        {
+            _compactNav = compact;
+            NavColumn.Width = new GridLength(compact ? 64 : 280);
+            NavIdentity.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+            foreach (var item in NavList.Items.OfType<Wpf.Ui.Controls.ListViewItem>())
+                if (item.Content is StackPanel sp && sp.Children.Count > 1) sp.Children[1].Visibility = NavIdentity.Visibility;
+            // Small window: keep the drop-downs compact so the descriptions beside them stay readable.
+            foreach (var combo in new[] { RunModeCombo, UnknownCombo })
+            {
+                combo.MinWidth = compact ? 150 : 250;
+                combo.MaxWidth = compact ? 210 : double.PositiveInfinity;
+            }
+        }
+        bool wide = PageScroller.ActualWidth - 56 >= 740;
+        if (_wide != wide)
+        {
+            _wide = wide;
+            DetailColumn.Width = wide ? new GridLength(320) : new GridLength(0);
+            Grid.SetRow(DetailPane, wide ? 0 : 1);
+            Grid.SetColumn(DetailPane, wide ? 1 : 0);
+            DetailPane.Margin = wide ? new Thickness(12, 0, 0, 0) : new Thickness(0, 8, 0, 0);
+        }
+        FitAppsList();
+    }
+
+    /// <summary>
+    /// The app list scrolls by itself and fits the window, so the selected app's options (beside it when wide, below
+    /// it when narrow) are always in view without scrolling past every app.
+    /// </summary>
+    private void FitAppsList()
+    {
+        double room = PageScroller.ViewportHeight - 270;          // title, tip, search box, column headers
+        if (_wide != true) room -= 300;                            // the options card below the list
+        AppsList.MaxHeight = Math.Max(220, room);
+    }
+
+    private void NavList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        string page = (NavList.SelectedItem as Wpf.Ui.Controls.ListViewItem)?.Tag as string ?? "General";
+        PageGeneral.Visibility = page == "General" ? Visibility.Visible : Visibility.Collapsed;
+        PageMonitors.Visibility = page == "Monitors" ? Visibility.Visible : Visibility.Collapsed;
+        PageApps.Visibility = page == "Apps" ? Visibility.Visible : Visibility.Collapsed;
+        PageAbout.Visibility = page == "About" ? Visibility.Visible : Visibility.Collapsed;
+        PageScroller.ScrollToTop();
+    }
+
+    private static void OpenUri(string uri)
+    {
+        try { Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true }); }
+        catch (Exception ex) { Log.Write($"Could not open {uri}: {ex.Message}"); }
+    }
+
+    private void OpenDisplaySettings_Click(object sender, RoutedEventArgs e) => OpenUri("ms-settings:display");
+    private void OpenProject_Click(object sender, RoutedEventArgs e) => OpenUri("https://github.com/eldavier888/MonitorWindowControl");
+    private void OpenPrivacy_Click(object sender, RoutedEventArgs e) => OpenUri("https://github.com/eldavier888/MonitorWindowControl/blob/main/PRIVACY.md");
+    private void OpenFolder_Click(object sender, RoutedEventArgs e) { System.IO.Directory.CreateDirectory(Paths.Dir); OpenUri(Paths.Dir); }
+
+    public static string AppVersion
+    {
+        get
+        {
+            var v = typeof(MainWindow).Assembly.GetName().Version;
+            return v == null ? "" : $"{v.Major}.{v.Minor}.{v.Build}";
+        }
     }
 
     private readonly System.Windows.Threading.DispatcherTimer _appsChangedDebounce;
@@ -103,12 +209,19 @@ public partial class MainWindow : FluentWindow
             {
                 RunModes.Helper => "A tiny helper (a few MB, no tray icon) places every new window and learns where you use apps. " +
                                    "This settings window only runs while it's open.",
-                RunModes.LaunchOnly => "Nothing runs in the background. Create a launch shortcut for an app below (Start menu → Monitor Window Control) " +
+                RunModes.LaunchOnly => "Nothing runs in the background. Create a launch shortcut for an app on the Apps page (Start menu → Monitor Window Control) " +
                                        "and open it from there: it opens on its monitor, then nothing keeps running. Windows opened another way aren't moved.",
                 _ => "Monitor Window Control stays in the tray, places every new window and learns where you use apps.",
             };
             BackgroundStatusText.Text = _app.BackgroundStatus();
             StartupToggle.IsEnabled = !launchOnly;
+            ExitCard.Visibility = s.RunMode == RunModes.Tray ? Visibility.Visible : Visibility.Collapsed;
+            NavStatus.Text = !s.Enabled ? "Paused" : s.RunMode switch
+            {
+                RunModes.Helper => "Running as a background helper",
+                RunModes.LaunchOnly => "Launch shortcuts only",
+                _ => "Running in the tray",
+            };
             StartupHint.Text = s.RunMode switch
             {
                 RunModes.Helper => "Starts the tiny helper when you sign in (no window, no tray icon).",
@@ -117,13 +230,13 @@ public partial class MainWindow : FluentWindow
             };
             LearnToggle.IsEnabled = !launchOnly;
             LearnHint.Text = launchOnly
-                ? "Needs something running in the background to notice where you use apps; set apps' monitors below instead."
+                ? "Needs something running in the background to notice where you use apps; set apps' monitors on the Apps page instead."
                 : "When you use an app on a monitor for a few seconds, that becomes its home. Only the window you're using counts.";
             LastActionText.Text = _engine.LastAction;
-            LastActionText.Visibility = string.IsNullOrEmpty(_engine.LastAction) ? Visibility.Collapsed : Visibility.Visible;
+            RecentPanel.Visibility = string.IsNullOrEmpty(_engine.LastAction) ? Visibility.Collapsed : Visibility.Visible;
 
             // Rebuild the monitor cards only when monitors (or their names) actually changed.
-            string sig = string.Join("|", _engine.Monitors.Select(m => $"{m.DeviceName}={m.Label}"));
+            string sig = string.Join("|", _engine.Monitors.Select(m => $"{m.DeviceName}={m.Label}/{m.Details}"));
             if (sig != _monitorSig) { _monitorSig = sig; MonitorsList.ItemsSource = _engine.Monitors.ToList(); }
         }
         finally { _updating = false; }
@@ -153,7 +266,12 @@ public partial class MainWindow : FluentWindow
                 .Where(o => s.Find(o.App.Key) == null)
                 .OrderBy(o => o.App.DisplayName, StringComparer.CurrentCultureIgnoreCase)
                 .Select(ToRow);
-            var rows = saved.Concat(openOnly).ToList();
+            var all = saved.Concat(openOnly).ToList();
+            string q = SearchBox.Text?.Trim() ?? "";
+            var rows = q.Length == 0 ? all : all.Where(r =>
+                r.Name.Contains(q, StringComparison.CurrentCultureIgnoreCase) ||
+                r.Detail.Contains(q, StringComparison.CurrentCultureIgnoreCase) ||
+                r.OpensOn.Contains(q, StringComparison.CurrentCultureIgnoreCase)).ToList();
 
             // Only rebuild the list when something changed, so a selection or an open dropdown isn't disturbed.
             if (AppsList.ItemsSource is not List<AppRow> current || !current.SequenceEqual(rows))
@@ -162,7 +280,11 @@ public partial class MainWindow : FluentWindow
                 AppsList.ItemsSource = rows;
                 AppsList.SelectedItem = rows.FirstOrDefault(r => r.Key == selectedKey);
             }
+            EmptyText.Text = all.Count == 0
+                ? "No apps yet. Open an app and it shows up here, or just use your apps: after a few seconds on a monitor, an app is learned."
+                : $"No apps match \"{q}\".";
             EmptyText.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            ForgetAllButton.IsEnabled = s.Apps.Count > 0;
         }
         finally { _updating = false; }
         UpdateSelectionPanel();
@@ -172,7 +294,7 @@ public partial class MainWindow : FluentWindow
     private static (string name, string detail) Names(string key, string displayName)
     {
         string name = string.IsNullOrWhiteSpace(displayName) ? key : displayName;
-        if (key.StartsWith(WindowInfo.WebAppKeyPrefix, StringComparison.Ordinal)) return (name, "web app"); // Netflix, Crave… inside Edge
+        if (key.StartsWith(WindowInfo.WebAppKeyPrefix, StringComparison.Ordinal)) return (name, "Web app"); // Netflix, Crave… inside Edge
         return (name, string.Equals(name, key, StringComparison.OrdinalIgnoreCase) ? "" : key);
     }
 
@@ -184,7 +306,8 @@ public partial class MainWindow : FluentWindow
         {
             var m = _engine.ResolveTarget(r);
             int n = r.AllowedMonitors.Count == 0 ? _engine.Monitors.Count : r.AllowedMonitors.Count;
-            opensOn = $"Last used: {m?.Name ?? "not yet"} (of {n})";
+            opensOn = m != null ? $"Where last used (now {m.Name})" : "Where last used";
+            if (n > 1 && n < _engine.Monitors.Count) opensOn += $", {n} allowed";
         }
         else
         {
@@ -192,15 +315,15 @@ public partial class MainWindow : FluentWindow
             opensOn = m != null ? m.Label : $"{r.MonitorName ?? r.MonitorDevice} (not connected)";
         }
         var (name, detail) = Names(r.Key, r.DisplayName);
-        return new AppRow(r.Key, name, detail, opensOn, r.Pinned || r.NeverMove ? "set by you" : "learned",
-                          true, open?.Monitor?.DeviceName);
+        return new AppRow(r.Key, name, detail, opensOn, r.Pinned || r.NeverMove ? "Set by you" : "Learned",
+                          open?.Monitor?.DeviceName);
     }
 
     private AppRow ToRow(Engine.OpenApp o)
     {
         var (name, detail) = Names(o.App.Key, o.App.DisplayName);
-        string where = o.Monitor != null ? $"Not set (now on {o.Monitor.Name})" : "Not set";
-        return new AppRow(o.App.Key, name, detail, where, "open now", false, o.Monitor?.DeviceName);
+        string where = o.Monitor != null ? $"Not set (on {o.Monitor.Name} now)" : "Not set";
+        return new AppRow(o.App.Key, name, detail, where, "Open now", o.Monitor?.DeviceName);
     }
 
     private void UpdateSelectionPanel()
@@ -209,13 +332,16 @@ public partial class MainWindow : FluentWindow
         var rule = row == null ? null : _engine.Settings.Find(row.Key);
         SelectionPanel.IsEnabled = row != null;
         ForgetButton.IsEnabled = rule != null;
+        SelectedAppName.Text = row?.Name ?? "No app selected";
+        SelectedAppDetail.Text = row == null ? "Select an app in the list." :
+            string.Join(" · ", new[] { row.Detail, row.Source }.Where(x => !string.IsNullOrEmpty(x)));
         UpdateShortcutRow(row, rule);
 
         // Don't reset what the user is picking unless the selection or that app's setting changed.
         string state = row == null ? "" :
             $"{row.Key}|{rule?.NeverMove}|{rule?.FollowLastUsed}|{rule?.MonitorDevice}|" +
             string.Join(",", rule?.AllowedMonitors.Select(a => a.Device) ?? Enumerable.Empty<string>()) + "|" +
-            string.Join(",", _engine.Monitors.Select(m => m.DeviceName));
+            string.Join(",", _engine.Monitors.Select(m => m.DeviceName + "=" + m.Label));
         if (row?.Key == _panelKey && state == _panelState) return;
         _panelKey = row?.Key; _panelState = state;
 
@@ -275,6 +401,14 @@ public partial class MainWindow : FluentWindow
         if (AppsList.SelectedItem is not AppRow row || _engine.Settings.Find(row.Key) is not AppRule rule) return;
         if (ShortcutManager.Exists(rule))
         {
+            var ask = new Wpf.Ui.Controls.MessageBox
+            {
+                Title = $"Remove the launch shortcut for {ShortcutManager.ShortcutName(rule)}?",
+                Content = "The shortcut in Start menu → Monitor Window Control (and on the desktop, if you made one) is deleted. " +
+                          "The app itself and where it opens aren't changed. If you pinned the shortcut to the taskbar, unpin it too.",
+                PrimaryButtonText = "Remove", CloseButtonText = "Cancel",
+            };
+            if (await ask.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
             ShortcutManager.Delete(rule);
             _engine.SetShortcutFile(rule.Key, null);
             _panelState = ""; UpdateSelectionPanel();
@@ -309,18 +443,27 @@ public partial class MainWindow : FluentWindow
 
     private void TargetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateAllowedPanel();
 
-    /// <summary>The list grows with its content; let the mouse wheel scroll the whole page instead.</summary>
-    private void AppsList_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    /// <summary>
+    /// The page doesn't jump when you click something or when the list refreshes itself, but it still scrolls to
+    /// whatever you move to with the keyboard (Tab, arrow keys).
+    /// </summary>
+    private void Page_RequestBringIntoView(object sender, RequestBringIntoViewEventArgs e)
     {
-        e.Handled = true;
-        PageScroller.ScrollToVerticalOffset(PageScroller.VerticalOffset - e.Delta);
+        // Only follow focus that you moved with the keyboard just now; opening the window, clicks and refreshes leave
+        // the page where it is.
+        if (_updating || unchecked(Environment.TickCount - _lastKeyTick) > 1000) e.Handled = true;
     }
 
-    /// <summary>The page only scrolls when you scroll it, never by itself when focus or content changes.</summary>
-    private void Page_RequestBringIntoView(object sender, RequestBringIntoViewEventArgs e) => e.Handled = true;
+    private void AppsList_RequestBringIntoView(object sender, RequestBringIntoViewEventArgs e) => Page_RequestBringIntoView(sender, e);
 
-    /// <summary>Clicking a row shouldn't make the page jump.</summary>
-    private void AppsList_RequestBringIntoView(object sender, RequestBringIntoViewEventArgs e) => e.Handled = true;
+    private void SearchBox_TextChanged(object sender, TextChangedEventArgs e) => RefreshAppList(background: false);
+
+    private void AppsList_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Delete && ForgetButton.IsEnabled) { e.Handled = true; Forget_Click(sender, e); }
+    }
+
+    private void Exit_Click(object sender, RoutedEventArgs e) => _app.ExitApp();
 
     private void AppsList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -374,7 +517,7 @@ public partial class MainWindow : FluentWindow
         var box = new Wpf.Ui.Controls.MessageBox
         {
             Title = $"Make {m.Name} your main monitor?",
-            Content = "This changes the main display in Windows itself: the taskbar clock, the Start menu and many new windows go there, " +
+            Content = "This changes the main monitor in Windows itself: the taskbar clock, the Start menu and many new windows go there, " +
                       "and apps Monitor Window Control hasn't learned yet open there. You can change it back here or in Windows Settings → Display.",
             PrimaryButtonText = "Make main",
             CloseButtonText = "Cancel",
@@ -404,7 +547,7 @@ public partial class MainWindow : FluentWindow
         content.Children.Add(Label("Number", 14));
         content.Children.Add(numberBox);
         var note = Label($"Leave the name empty to use the model name ({m.FriendlyName}). Your number decides the order and shows in front of the name, " +
-                         "e.g. \"2 · TV\". If another monitor already has that number, it moves to this one. These only apply inside Monitor Window Control: " +
+                         "for example \"2 · TV\". If another monitor already has that number, it moves to this one. These only apply inside Monitor Window Control: " +
                          "Windows keeps its own display numbers, which apps can't change.", 14);
         note.Foreground = (System.Windows.Media.Brush)FindResource("TextFillColorSecondaryBrush");
         note.FontSize = 12;
@@ -419,11 +562,23 @@ public partial class MainWindow : FluentWindow
             _engine.RenameMonitor(m, nameBox.Text, numberBox.SelectedItem as int?);
     }
 
-    private void Forget_Click(object sender, RoutedEventArgs e)
+    private async void Forget_Click(object sender, RoutedEventArgs e)
     {
-        if (AppsList.SelectedItem is not AppRow row) return;
-        if (_engine.Settings.Find(row.Key) is AppRule rule) ShortcutManager.Delete(rule); // its launch shortcut goes too
+        if (AppsList.SelectedItem is not AppRow row || _engine.Settings.Find(row.Key) is not AppRule rule) return;
+        bool hasShortcut = ShortcutManager.Exists(rule);
+        var box = new Wpf.Ui.Controls.MessageBox
+        {
+            Title = $"Forget {row.Name}?",
+            Content = (rule.Pinned || rule.NeverMove ? "The monitor you chose for it is removed" : "Where it opens is forgotten") +
+                      (hasShortcut ? ", and its launch shortcut is deleted." : ".") +
+                      (_engine.Settings.LearnAutomatically && _engine.Settings.RunMode != RunModes.LaunchOnly
+                          ? " It's learned again the next time you use it." : ""),
+            PrimaryButtonText = "Forget", CloseButtonText = "Cancel",
+        };
+        if (await box.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary) return;
+        ShortcutManager.Delete(rule); // its launch shortcut goes too
         _engine.Forget(row.Key);
+        AppsList.Focus();
     }
 
     private async void ForgetAll_Click(object sender, RoutedEventArgs e)
@@ -452,6 +607,11 @@ public partial class MainWindow : FluentWindow
         catch (Exception ex)
         {
             Log.Write("Could not open log: " + ex.Message);
+            _ = new Wpf.Ui.Controls.MessageBox
+            {
+                Title = "Couldn't open the activity log",
+                Content = $"It's the file {Paths.LogFile}. ({ex.Message})", CloseButtonText = "OK",
+            }.ShowDialogAsync();
         }
     }
 }

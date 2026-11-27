@@ -35,12 +35,12 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
-        _mutex = new Mutex(true, MutexName, out bool firstInstance);
+        _mutex = Native.TryCreateOwnedMutex(MutexName, out bool firstInstance);
         if (!firstInstance)
         {
             // Already running: ask that copy to show its window, then quit.
             try { using var ev = EventWaitHandle.OpenExisting(ShowEventName); ev.Set(); } catch { }
-            _mutex.Dispose(); _mutex = null;
+            _mutex?.Dispose(); _mutex = null;
             IsExiting = true;
             Shutdown();
             return;
@@ -49,6 +49,9 @@ public partial class App : Application
         base.OnStartup(e);
         DispatcherUnhandledException += OnUnhandled;
         AppDomain.CurrentDomain.UnhandledException += (_, a) => Log.Write("FATAL: " + a.ExceptionObject);
+        // The tray icon's menu runs in WinForms, which has its own error path (and would show its own error dialog).
+        System.Windows.Forms.Application.SetUnhandledExceptionMode(System.Windows.Forms.UnhandledExceptionMode.CatchException);
+        System.Windows.Forms.Application.ThreadException += (_, a) => Log.Write("Unexpected error (tray): " + a.Exception);
 
         _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
         _showWait = ThreadPool.RegisterWaitForSingleObject(_showEvent,
@@ -72,8 +75,7 @@ public partial class App : Application
 
         if (_engine.Settings.RunMode == RunModes.Tray)
         {
-            if (firstRun) ShowMainWindow();
-            else if (!fromAutostart) _tray?.ShowBalloon("Monitor Window Control is running", "It's in the tray. Double-click the icon to open it.");
+            if (firstRun || !fromAutostart) ShowMainWindow();
         }
         else if (fromAutostart)
         {
@@ -169,7 +171,7 @@ public partial class App : Application
                     if (bg == null || !HelperManager.IsRunning()) return "The helper isn't running.";
                     bg.Refresh();
                     return $"Running in the background: the helper only, using {bg.PrivateMemorySize64 / 1048576.0:0.#} MB. " +
-                           "This window closes completely when you close it.";
+                           "Closing this window exits it completely.";
                 }
                 finally { foreach (var p in helpers) p.Dispose(); }
             case RunModes.LaunchOnly:
@@ -182,11 +184,24 @@ public partial class App : Application
         }
     }
 
+    private bool _errorShown;
+
     private void OnUnhandled(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
         Log.Write("Unexpected error: " + e.Exception);
         e.Handled = true;
+        if (_errorShown || _window == null || IsExiting) return; // tell the user once, and only while they're looking
+        _errorShown = true;
+        try
+        {
+            System.Windows.MessageBox.Show(_window,
+                "Something went wrong, but Monitor Window Control kept running. The details are in the activity log:\n" + Paths.LogFile,
+                "Monitor Window Control", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        catch { }
     }
+
+    private bool _trayHintShown;
 
     public void ShowMainWindow()
     {
@@ -203,11 +218,21 @@ public partial class App : Application
                     Dispatcher.BeginInvoke(ExitApp);
                     return;
                 }
-                // Tray: the window is gone, the app stays in the tray. Give its memory back.
+                // Tray: the window is gone, the app stays in the tray. Say so once, and give its memory back.
+                if (!_trayHintShown && !IsExiting)
+                {
+                    _trayHintShown = true;
+                    _tray?.ShowBalloon("Still placing your windows", "Monitor Window Control keeps running in the tray. Double-click its icon to open it again.");
+                }
                 Dispatcher.BeginInvoke(() => { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); },
                     DispatcherPriority.ApplicationIdle);
             };
             _window = w;
+            // Fit small screens (for example a 1366×768 laptop at 125 %).
+            double maxH = SystemParameters.WorkArea.Height - 24;
+            if (maxH > w.MinHeight && w.Height > maxH) w.Height = maxH;
+            double maxW = SystemParameters.WorkArea.Width - 24;
+            if (maxW > w.MinWidth && w.Width > maxW) w.Width = maxW;
             if (_engine.MainMonitor is MonitorInfo main)
             {
                 // Open centered on the main monitor (WPF's "center screen" can pick the TV).

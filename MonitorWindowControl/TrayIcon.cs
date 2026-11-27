@@ -5,7 +5,7 @@ using System.Windows.Forms;
 
 namespace MonitorWindowControl;
 
-/// <summary>Notification-area icon: double-click opens; menu has Open, Enabled, Exit.</summary>
+/// <summary>Notification-area icon: double-click opens; menu has Open, Move new windows (pause), Exit.</summary>
 internal sealed class TrayIcon : IDisposable
 {
     private readonly Engine _engine;
@@ -13,6 +13,7 @@ internal sealed class TrayIcon : IDisposable
     private readonly ContextMenuStrip _menu;
     private readonly ToolStripMenuItem _enabledItem;
     private readonly Icon? _iconImage;
+    private readonly Font _boldFont;
 
     public TrayIcon(Engine engine, Action open, Action exit)
     {
@@ -22,8 +23,9 @@ internal sealed class TrayIcon : IDisposable
             _iconImage = s != null ? new Icon(s, SystemInformation.SmallIconSize) : null;
 
         _menu = new ContextMenuStrip();
-        var openItem = new ToolStripMenuItem("Open", null, (_, _) => open()) { Font = new Font(SystemFonts.MenuFont!, FontStyle.Bold) };
-        _enabledItem = new ToolStripMenuItem("Enabled", null, (_, _) => _engine.SetEnabled(!_engine.Settings.Enabled));
+        using (var menuFont = SystemFonts.MenuFont ?? new Font("Segoe UI", 9f)) _boldFont = new Font(menuFont, FontStyle.Bold);
+        var openItem = new ToolStripMenuItem("Open", null, (_, _) => open()) { Font = _boldFont };
+        _enabledItem = new ToolStripMenuItem("Move new windows", null, (_, _) => _engine.SetEnabled(!_engine.Settings.Enabled));
         var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => exit());
         _menu.Items.AddRange(new ToolStripItem[] { openItem, _enabledItem, new ToolStripSeparator(), exitItem });
 
@@ -56,5 +58,6 @@ internal sealed class TrayIcon : IDisposable
         _icon.Dispose();
         _menu.Dispose();
         _iconImage?.Dispose();
+        _boldFont.Dispose();
     }
 }

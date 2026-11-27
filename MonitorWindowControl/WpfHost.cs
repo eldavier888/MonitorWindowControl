@@ -25,8 +25,6 @@ public sealed class WpfHost : IEngineHost, IDisposable
 
     public IEngineTimer CreateTimer(int intervalMs, Action tick) => new Timer(_dispatcher, intervalMs, tick);
 
-    public void Post(Action action) => _dispatcher.BeginInvoke(action);
-
     public void Dispose()
     {
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
@@ -40,7 +38,12 @@ public sealed class WpfHost : IEngineHost, IDisposable
         public Timer(Dispatcher dispatcher, int ms, Action tick)
         {
             _timer = new DispatcherTimer(DispatcherPriority.Normal, dispatcher) { Interval = TimeSpan.FromMilliseconds(ms) };
-            _timer.Tick += (_, _) => tick();
+            // A DispatcherTimer whose Tick throws never ticks again: keep it alive whatever happens.
+            _timer.Tick += (_, _) =>
+            {
+                try { tick(); }
+                catch (Exception ex) { Log.Write("Unexpected error (timer): " + ex); }
+            };
         }
 
         public bool IsEnabled => _timer.IsEnabled;

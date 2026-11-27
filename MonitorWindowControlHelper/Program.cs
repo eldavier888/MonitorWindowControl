@@ -50,8 +50,8 @@ internal static class Program
 
     private static int Background()
     {
-        using var single = new Mutex(true, HelperMutexName, out bool first);
-        if (!first) return 0; // already running
+        using var single = Native.TryCreateOwnedMutex(HelperMutexName, out bool first);
+        if (!first) return 0; // already running (possibly a copy started as administrator)
 
         using var exitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, HelperExitEventName);
         using var host = new NativeHost();
