@@ -50,6 +50,12 @@ public static class IdentifyOverlay
             {
                 BorderThickness = new Thickness(8),
                 Background = Brushes.Transparent,
+                Child = new TextBlock
+                {
+                    Text = m.Name, FontSize = 28, FontWeight = FontWeights.SemiBold, Foreground = Brushes.White,
+                    Background = new SolidColorBrush(Color.FromArgb(200, 0, 0, 0)), Padding = new Thickness(16, 8, 16, 8),
+                    HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(16),
+                },
             };
             border.SetResourceReference(Border.BorderBrushProperty, "AccentFillColorDefaultBrush");
             if (border.BorderBrush == null) border.BorderBrush = SystemColors.HighlightBrush;

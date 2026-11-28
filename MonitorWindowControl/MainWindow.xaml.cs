@@ -966,10 +966,8 @@ public partial class MainWindow : FluentWindow
     }
 
     /// <summary>Pointing at a monitor's card outlines that monitor, so you can see which one it is.</summary>
-    private void MonitorCard_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
-    {
-        if ((sender as FrameworkElement)?.DataContext is MonitorInfo m && _engine.Monitors.Count > 1) IdentifyOverlay.ShowOutline(m);
-    }
+    // (Mouse users have Identify; outlining on hover flashed a frame around the screen the window is on.)
+    private void MonitorCard_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e) { }
 
     private void MonitorCard_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e) => IdentifyOverlay.HideOutline();
 
@@ -980,7 +978,8 @@ public partial class MainWindow : FluentWindow
         if (e.NewValue is true)
         {
             MonitorLayout.Select(new MonitorInfo?[] { m });
-            if (_engine.Monitors.Count > 1) IdentifyOverlay.ShowOutline(m);
+            // Only when the keyboard moved the focus (a click also focuses the card).
+            if (_engine.Monitors.Count > 1 && unchecked(Environment.TickCount - _lastKeyTick) < 1000) IdentifyOverlay.ShowOutline(m);
         }
         else IdentifyOverlay.HideOutline();
     }
