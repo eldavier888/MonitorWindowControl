@@ -260,6 +260,12 @@ public sealed class MonitorHardware
     public string? Model { get; set; }
     /// <summary>EDID serial number (null when the monitor doesn't report one).</summary>
     public string? Serial { get; set; }
+    /// <summary>
+    /// For one area of a split monitor (see <see cref="MonitorSplit"/>): which area, 1 to 4. Null = the whole monitor
+    /// (older files never have it; a monitor saved before it was split means its first area).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? Area { get; set; }
 
     /// <summary>True when nothing is known.</summary>
     [JsonIgnore]
@@ -267,9 +273,9 @@ public sealed class MonitorHardware
 
     public bool SameAs(MonitorHardware? other) =>
         other != null && string.Equals(DevicePath, other.DevicePath, StringComparison.OrdinalIgnoreCase)
-        && string.Equals(Model, other.Model, StringComparison.OrdinalIgnoreCase) && Serial == other.Serial;
+        && string.Equals(Model, other.Model, StringComparison.OrdinalIgnoreCase) && Serial == other.Serial && Area == other.Area;
 
-    public MonitorHardware Copy() => new() { DevicePath = DevicePath, Model = Model, Serial = Serial };
+    public MonitorHardware Copy() => new() { DevicePath = DevicePath, Model = Model, Serial = Serial, Area = Area };
 
     /// <summary>Trims the fields and returns null when nothing is left (repairs hand-edited files).</summary>
     public static MonitorHardware? Clean(MonitorHardware? h)
@@ -277,7 +283,99 @@ public sealed class MonitorHardware
         if (h == null) return null;
         static string? Trim(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
         h.DevicePath = Trim(h.DevicePath); h.Model = Trim(h.Model); h.Serial = Trim(h.Serial);
+        if (h.Area is < 1 or > SplitPresets.MaxAreas) h.Area = null;
         return h.IsEmpty ? null : h;
+    }
+}
+
+/// <summary>
+/// "Split into areas" for one physical monitor: 2 to 4 areas side by side (or 2 stacked) that work like separate
+/// monitors inside this app. Windows itself still sees one monitor.
+/// </summary>
+public sealed class MonitorSplit
+{
+    /// <summary>The physical monitor (its hardware identity has no <see cref="MonitorHardware.Area"/>).</summary>
+    public MonitorRef Monitor { get; set; } = new();
+    /// <summary>One of <see cref="SplitPresets"/>.</summary>
+    public string Preset { get; set; } = SplitPresets.None;
+    /// <summary>Each area's share of the width (or height, when stacked), in order; they add up to 1.</summary>
+    public List<double> Ratios { get; set; } = new();
+    /// <summary>Each area's name, in order ("Left", "Right"…).</summary>
+    public List<string> Names { get; set; } = new();
+}
+
+/// <summary>The ways a monitor can be split, with their shares and default names.</summary>
+public static class SplitPresets
+{
+    public const int MaxAreas = 4;
+    public const string None = "None";
+    public const string TwoEqual = "TwoEqual";
+    public const string Two6040 = "Two6040";
+    public const string Two7030 = "Two7030";
+    public const string ThreeEqual = "ThreeEqual";
+    public const string FourEqual = "FourEqual";
+    public const string TwoStacked = "TwoStacked";
+
+    /// <summary>Every choice, in the order the dialog shows them.</summary>
+    public static readonly string[] All = { None, TwoEqual, Two6040, Two7030, ThreeEqual, FourEqual, TwoStacked };
+
+    /// <summary>Said wherever splitting is offered: it only changes this app, not Windows.</summary>
+    public const string HonestNote = "Windows still sees one monitor: the taskbar and Start menu don't change.";
+
+    public static string Describe(string? preset) => preset switch
+    {
+        TwoEqual => "2 equal areas",
+        Two6040 => "2 areas (60 / 40)",
+        Two7030 => "2 areas (70 / 30)",
+        ThreeEqual => "3 equal areas",
+        FourEqual => "4 equal areas",
+        TwoStacked => "2 areas, one above the other",
+        _ => "Don't split",
+    };
+
+    public static bool IsKnown(string? preset) => preset != null && All.Contains(preset);
+    public static bool IsStacked(string? preset) => preset == TwoStacked;
+
+    /// <summary>The preset's own shares (null for <see cref="None"/> or an unknown preset).</summary>
+    public static double[]? DefaultRatios(string? preset) => preset switch
+    {
+        TwoEqual or TwoStacked => new[] { 0.5, 0.5 },
+        Two6040 => new[] { 0.6, 0.4 },
+        Two7030 => new[] { 0.7, 0.3 },
+        ThreeEqual => new[] { 1 / 3.0, 1 / 3.0, 1 / 3.0 },
+        FourEqual => new[] { 0.25, 0.25, 0.25, 0.25 },
+        _ => null,
+    };
+
+    /// <summary>The default names: Left / Right, Left / Middle / Right, Top / Bottom…</summary>
+    public static string[] DefaultNames(string? preset) => preset switch
+    {
+        TwoStacked => new[] { "Top", "Bottom" },
+        ThreeEqual => new[] { "Left", "Middle", "Right" },
+        FourEqual => new[] { "Left", "Middle left", "Middle right", "Right" },
+        _ => new[] { "Left", "Right" },
+    };
+
+    public static int AreaCount(string? preset) => DefaultRatios(preset)?.Length ?? 1;
+
+    /// <summary>The shares to use: the saved ones when they make sense for the preset, else the preset's own.</summary>
+    public static double[]? Ratios(MonitorSplit s)
+    {
+        var defaults = DefaultRatios(s.Preset);
+        if (defaults == null) return null;
+        var saved = s.Ratios;
+        if (saved == null || saved.Count != defaults.Length || saved.Any(r => double.IsNaN(r) || r < 0.1 || r > 0.9)) return defaults;
+        double sum = saved.Sum();
+        return sum <= 0 ? defaults : saved.Select(r => r / sum).ToArray();
+    }
+
+    /// <summary>The names to use: the saved ones, with defaults for any that are missing or empty.</summary>
+    public static string[] Names(MonitorSplit s)
+    {
+        var names = DefaultNames(s.Preset);
+        for (int i = 0; i < names.Length && s.Names != null && i < s.Names.Count; i++)
+            if (!string.IsNullOrWhiteSpace(s.Names[i])) names[i] = s.Names[i].Trim();
+        return names;
     }
 }
 
@@ -637,6 +735,10 @@ public sealed class AppSettings
     public List<MonitorNickname> MonitorNicknames { get; set; } = new();
     /// <summary>Per-monitor choices, such as whether a wireless or USB monitor is temporary.</summary>
     public List<MonitorOptions> MonitorOptions { get; set; } = new();
+    /// <summary>"Split into areas": monitors divided into areas that work like separate monitors.</summary>
+    public List<MonitorSplit> MonitorSplits { get; set; } = new();
+    /// <summary>"Maximize fills the area": a window you maximize on a split monitor fills its area instead of the whole monitor.</summary>
+    public bool MaximizeFillsArea { get; set; } = true;
     /// <summary>true = don't move windows while this PC is used through Remote Desktop (learning always pauses then).</summary>
     public bool PauseDuringRemoteDesktop { get; set; } = true;
     /// <summary>
@@ -683,6 +785,7 @@ public sealed class AppSettings
 [JsonSerializable(typeof(AppSettings))]
 [JsonSerializable(typeof(MonitorHardware))]
 [JsonSerializable(typeof(MonitorOptions))]
+[JsonSerializable(typeof(MonitorSplit))]
 [JsonSerializable(typeof(WindowPosition))]
 [JsonSerializable(typeof(AppRule))]
 [JsonSerializable(typeof(HotKeySettings))]
@@ -846,6 +949,7 @@ public static class SettingsStore
             if (!o.IsOffAt(now)) { o.Off = false; o.OffUntilUtc = null; } // "for 1 hour" is over
         }
         s.MonitorOptions.RemoveAll(o => o.IsEmpty);
+        CleanSplits(s);
         (s.Fallback, s.FallbackMonitor) = CleanFallback(s.Fallback, s.FallbackMonitor);
         if (s.KeepMainMonitor != null) CleanRef(s.KeepMainMonitor);
         else s.KeepMainStopped = false;
@@ -888,6 +992,33 @@ public static class SettingsStore
             foreach (var h in x.Homes) CleanRef(h.Monitor);
         }
         if (s.UsualSetup != null && !s.Setups.Any(x => x.Id == s.UsualSetup)) s.UsualSetup = s.Setups.FirstOrDefault()?.Id;
+    }
+
+    /// <summary>
+    /// "Split into areas": drops entries without a monitor or with an unknown preset (or "Don't split"), keeps the
+    /// shares only when they fit the preset, and gives every area a name. A monitor's hardware never names an area here.
+    /// </summary>
+    internal static void CleanSplits(AppSettings s)
+    {
+        s.MonitorSplits ??= new();
+        s.MonitorSplits.RemoveAll(x => x == null || IsEmptyRef(x.Monitor) || !SplitPresets.IsKnown(x.Preset) || x.Preset == SplitPresets.None);
+        foreach (var x in s.MonitorSplits)
+        {
+            CleanRef(x.Monitor);
+            if (x.Monitor.Hardware != null) x.Monitor.Hardware.Area = null;
+            x.Monitor.Device = MonitorAreas.PhysicalDeviceOf(x.Monitor.Device);
+            x.Ratios = SplitPresets.Ratios(x)!.ToList();
+            x.Names = SplitPresets.Names(x).ToList();
+        }
+        // One split per monitor (the last one saved wins).
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = s.MonitorSplits.Count - 1; i >= 0; i--)
+        {
+            var m = s.MonitorSplits[i].Monitor;
+            string key = m.Hardware is { DevicePath: not null } h ? "p:" + h.DevicePath
+                : m.Hardware is { Model: not null, Serial: not null } k ? $"s:{k.Model}|{k.Serial}" : $"d:{m.Device}|{m.Name}";
+            if (!seen.Add(key)) s.MonitorSplits.RemoveAt(i);
+        }
     }
 
     /// <summary>App groups: drops groups without an id or name, and apps without a key (each app once per group).</summary>

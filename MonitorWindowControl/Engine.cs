@@ -64,7 +64,8 @@ public sealed partial class Engine : IDisposable
     private readonly IEngineTimer _learnTimer;
     private readonly IEngineTimer _displayTimer;
     private readonly IEngineTimer _snapshotTimer;
-    private List<MonitorInfo> _monitors = new();
+    private List<MonitorInfo> _monitors = new();  // as the app uses them: a split monitor is one entry per area
+    private List<MonitorInfo> _physical = new();  // as Windows has them (Make main, Disconnect, monitor changes)
     private string _monitorSignature = "";
     private string _layoutSignature = "";
     private DateTime _lastMonitorChangeUtc = DateTime.MinValue;
@@ -89,6 +90,8 @@ public sealed partial class Engine : IDisposable
     private DateTime _restoreBaselineUtc, _restoreDeadlineUtc;
     private int _restoreBaselineGeneration;
     private bool _restoreDue;
+    private IntPtr _maximizeHook;                           // a window was maximized (only while a monitor is split)
+    private readonly Dictionary<IntPtr, (DateTime First, int Count)> _maximizedFills = new();
     private IntPtr _moveHook;                               // you finished dragging or resizing a window…
     private readonly HashSet<IntPtr> _movedSinceWake = new(); // …while windows wait to be put back after sleep
 
@@ -394,6 +397,7 @@ public sealed partial class Engine : IDisposable
                 _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
             NoteForeground(Native.GetForegroundWindow());
             UpdateHotKeys();
+            UpdateMaximizeHook(); // (only while a monitor is split into areas)
             ListenForLaunches(); // launch shortcuts that open an app on a chosen monitor
         }
         return true;
@@ -407,6 +411,8 @@ public sealed partial class Engine : IDisposable
         if (_moveHook != IntPtr.Zero) { Native.UnhookWinEvent(_moveHook); _moveHook = IntPtr.Zero; }
         if (_uncloakHook != IntPtr.Zero) { Native.UnhookWinEvent(_uncloakHook); _uncloakHook = IntPtr.Zero; }
         if (_foregroundHook != IntPtr.Zero) { Native.UnhookWinEvent(_foregroundHook); _foregroundHook = IntPtr.Zero; }
+        if (_maximizeHook != IntPtr.Zero) { Native.UnhookWinEvent(_maximizeHook); _maximizeHook = IntPtr.Zero; }
+        _maximizedFills.Clear();
         UnregisterHotKeys();
         StopListeningForLaunches();
         _movedByYou.Clear(); _rescueDue = false; _lastAppWindow = IntPtr.Zero;
@@ -609,12 +615,17 @@ public sealed partial class Engine : IDisposable
     {
         var wasClosed = _monitors.Where(m => m.IsSwitchedOff || m.OnlyChosenApps)
                                  .Select(m => m.DeviceName).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var list = _monitorSource.Enumerate();
+        var physical = _monitorSource.Enumerate();
+        foreach (var p in physical) p.PhysicalCount = physical.Count;
+        _physical = physical;
+        // "Split into areas": each split monitor is replaced by its areas, which work like monitors of their own.
+        var list = MonitorAreas.Split(physical, p => SplitOf(physical, p));
         _monitors = list;
         var now = DateTime.UtcNow;
         var nextExpiry = DateTime.MaxValue;
         foreach (var m in list)
         {
+            m.PhysicalCount = physical.Count;
             foreach (var t in m.Targets)
             {
                 var custom = Settings.MonitorNicknames.FirstOrDefault(n => MatchesTarget(n.Monitor, t));
@@ -622,9 +633,9 @@ public sealed partial class Engine : IDisposable
                 t.Number = custom?.Number;
             }
             // A duplicated display is temporary only if every monitor showing it is (casting a copy of the main monitor isn't).
-            m.IsTemporary = m.Targets.All(t => IsTemporaryTarget(t));
+            m.IsTemporary = m.Targets.All(t => IsTemporaryTarget(m, t));
             // The same goes for "switched off" and "only apps I choose": every monitor showing it must be.
-            var options = m.Targets.Select(OptionsOf).ToList();
+            var options = m.Targets.Select(t => OptionsOf(m, t)).ToList();
             m.IsSwitchedOff = options.All(o => o != null && o.IsOffAt(now));
             m.SwitchedOffUntilUtc = !m.IsSwitchedOff || options.Any(o => o!.OffUntilUtc == null) ? null : options.Max(o => o!.OffUntilUtc);
             if (m.SwitchedOffUntilUtc is DateTime until && until < nextExpiry) nextExpiry = until;
@@ -635,12 +646,19 @@ public sealed partial class Engine : IDisposable
         // A monitor you switched back on (or opened to every app again): windows that had to go elsewhere can go back.
         if (list.Any(m => wasClosed.Contains(m.DeviceName) && !m.IsSwitchedOff && !m.OnlyChosenApps)) ScheduleReturnCheck();
         // Your numbers decide the order (numbered first, 1, 2, 3…); otherwise main first, then left to right.
-        list = list.OrderBy(m => m.Number ?? int.MaxValue).ThenByDescending(m => m.IsPrimary).ThenBy(m => m.Bounds.Left).ToList();
+        list = list.OrderBy(m => m.Number ?? int.MaxValue).ThenByDescending(m => m.IsPrimary).ThenBy(m => m.Bounds.Left)
+                   .ThenBy(m => m.Bounds.Top).ToList();
         _monitors = list;
+        // With a split monitor and no numbers of your own, every monitor and area shows its place: "1 · Left", "2 · Right".
+        bool autoNumbers = list.Any(m => m.IsArea) && list.All(m => m.Number == null);
+        for (int i = 0; i < list.Count; i++) list[i].AutoNumber = autoNumbers ? i + 1 : null;
         foreach (var m in list) m.IdentityNote = IdentityNote(m);
-        UpdateSetupId(list);
+        // (A setup is the monitors Windows has: splitting one into areas doesn't make it another setup.)
+        UpdateSetupId(list.Where(m => !m.IsTemporary && (m.Area ?? 1) == 1).Select(m => m.Physical ?? m).ToList());
+        UpdateMaximizeHook(); // (a split may have been saved by the other program)
 
-        string layout = MonitorService.LayoutSignature(list);
+        // (Monitor changes are about Windows' own monitors: splitting one into areas isn't one.)
+        string layout = MonitorService.LayoutSignature(physical);
         if (layout != _layoutSignature)
         {
             if (_layoutSignature.Length > 0) // (not the first read at startup)
@@ -677,7 +695,7 @@ public sealed partial class Engine : IDisposable
     {
         if (m.IsDuplicated) return null;
         var t = m.Targets[0];
-        var twin = _monitors.Where(o => !ReferenceEquals(o, m))
+        var twin = _monitors.Where(o => !ReferenceEquals(o, m) && o.PhysicalDevice != m.PhysicalDevice) // (not another area of it)
             .FirstOrDefault(o => o.Targets.Any(x => string.IsNullOrEmpty(t.Model) ? SameModelName(x, t) : t.Model == x.Model));
         if (twin == null) return null;
         var other = twin.Targets.First(x => string.IsNullOrEmpty(t.Model) ? SameModelName(x, t) : t.Model == x.Model);
@@ -695,18 +713,98 @@ public sealed partial class Engine : IDisposable
     }
 
     /// <summary>Is this monitor temporary: your choice for it, else wireless and virtual monitors are.</summary>
-    private bool IsTemporaryTarget(MonitorTarget t) => OptionsOf(t)?.Temporary ?? t.IsTemporaryByDefault;
+    private bool IsTemporaryTarget(MonitorInfo m, MonitorTarget t) => OptionsOf(m, t)?.Temporary ?? t.IsTemporaryByDefault;
 
-    /// <summary>Your saved choices for one physical monitor, or null if you made none.</summary>
-    private MonitorOptions? OptionsOf(MonitorTarget t) => Settings.MonitorOptions.FirstOrDefault(o => MatchesTarget(o.Monitor, t));
+    /// <summary>
+    /// Your saved choices for one physical monitor, or null if you made none. They're about the physical monitor, so
+    /// every area of a split monitor shares them.
+    /// </summary>
+    private MonitorOptions? OptionsOf(MonitorInfo m, MonitorTarget t)
+    {
+        if (m.Physical is not { } p) return Settings.MonitorOptions.FirstOrDefault(o => MatchesTarget(o.Monitor, t));
+        var whole = p.Targets[0];
+        return Settings.MonitorOptions.FirstOrDefault(o =>
+            ReferenceEquals(MonitorMatcher.FindTarget(_physical, o.Monitor.Name, o.Monitor.Device, o.Monitor.Hardware)?.Target, whole));
+    }
 
-    /// <summary>Your saved choices for a monitor (its first physical monitor), added if there are none yet.</summary>
+    /// <summary>Your saved choices for a monitor (its first physical monitor, or the whole monitor of an area), added if there are none yet.</summary>
     private MonitorOptions OptionsFor(MonitorInfo m)
     {
         var t = m.Targets[0];
-        var o = OptionsOf(t);
-        if (o == null) { o = new MonitorOptions { Monitor = RefTo(m, t) }; Settings.MonitorOptions.Add(o); }
+        var o = OptionsOf(m, t);
+        if (o == null)
+        {
+            var p = m.Physical;
+            o = new MonitorOptions { Monitor = p == null ? RefTo(m, t) : RefTo(p, p.Targets[0]) };
+            Settings.MonitorOptions.Add(o);
+        }
         return o;
+    }
+
+    /// <summary>The split saved for a physical monitor, or null if it isn't split.</summary>
+    private MonitorSplit? SplitOf(IReadOnlyList<MonitorInfo> physical, MonitorInfo p) =>
+        Settings.MonitorSplits.LastOrDefault(s =>
+            ReferenceEquals(MonitorMatcher.Find(physical, s.Monitor.Name, s.Monitor.Device, s.Monitor.Hardware), p));
+
+    /// <summary>The whole monitor a monitor or area is on, as Windows has it (for Make main, Disconnect and DPI).</summary>
+    public MonitorInfo PhysicalOf(MonitorInfo m) =>
+        _physical.FirstOrDefault(p => string.Equals(p.DeviceName, m.PhysicalDevice, StringComparison.OrdinalIgnoreCase)) ?? m.Physical ?? m;
+
+    /// <summary>The monitors as Windows has them (a split monitor once, not per area).</summary>
+    public IReadOnlyList<MonitorInfo> PhysicalMonitors => _physical;
+
+    /// <summary>The split saved for this monitor (or the monitor of this area), or null if it isn't split.</summary>
+    public MonitorSplit? SplitFor(MonitorInfo m) => SplitOf(_physical, PhysicalOf(m));
+
+    /// <summary>
+    /// "Split into areas": divides a monitor into areas that work like separate monitors (<see cref="SplitPresets.None"/>
+    /// = back to one). <paramref name="names"/> are the areas' names (empty ones get the default). Windows still sees one
+    /// monitor. Apps set to the whole monitor open in its first area.
+    /// </summary>
+    public void SetMonitorSplit(MonitorInfo m, string preset, IReadOnlyList<string>? names)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        var p = PhysicalOf(m);
+        if (p.IsDuplicated) return;
+        Settings.MonitorSplits.RemoveAll(s =>
+            ReferenceEquals(MonitorMatcher.Find(_physical, s.Monitor.Name, s.Monitor.Device, s.Monitor.Hardware), p));
+        string was = p.FriendlyName;
+        if (SplitPresets.IsKnown(preset) && preset != SplitPresets.None)
+        {
+            var hw = MonitorHardware.Clean(p.Hardware);
+            if (hw != null) hw.Area = null;
+            var split = new MonitorSplit
+            {
+                Monitor = new MonitorRef { Device = p.DeviceName, Name = p.FriendlyName, Hardware = hw },
+                Preset = preset, Ratios = SplitPresets.DefaultRatios(preset)!.ToList(),
+                Names = (names ?? Array.Empty<string>()).Select(n => n?.Trim() ?? "").ToList(),
+            };
+            split.Names = SplitPresets.Names(split).ToList();
+            Settings.MonitorSplits.Add(split);
+        }
+        Save();
+        RefreshMonitors();
+        UpdateMaximizeHook();
+        Note(preset == SplitPresets.None || !SplitPresets.IsKnown(preset)
+                 ? $"{was} is one monitor again (not split into areas)."
+                 : $"{was} is split into {SplitPresets.Describe(preset).ToLowerInvariant()}: " +
+                   string.Join(", ", _monitors.Where(x => x.PhysicalDevice == p.DeviceName).Select(x => x.Name)) + ".",
+             $"[{p.DeviceName}]");
+        Changed?.Invoke();
+    }
+
+    /// <summary>"Maximize fills the area" (split monitors): on = a maximized window fills its area instead of the whole monitor.</summary>
+    public void SetMaximizeFillsArea(bool on)
+    {
+        using var _lock = SettingsStore.Lock();
+        ReloadIfChanged();
+        if (Settings.MaximizeFillsArea == on) return;
+        Settings.MaximizeFillsArea = on;
+        Save();
+        UpdateMaximizeHook();
+        Log.Write(on ? "Maximize fills the area: on." : "Maximize fills the area: off (maximized windows fill the whole monitor).");
+        Changed?.Invoke();
     }
 
     /// <summary>The connected monitor a saved reference points to, or null if it isn't connected.</summary>
@@ -882,9 +980,90 @@ public sealed partial class Engine : IDisposable
     private MonitorInfo? MonitorOfWindow(IntPtr hwnd)
     {
         string? dev = _monitorSource.DeviceOfWindow(hwnd);
-        var m = MonitorByDevice(dev);
-        if (m == null && dev != null) { RefreshMonitors(); m = MonitorByDevice(dev); }
+        var m = MonitorOnDevice(dev, hwnd);
+        if (m == null && dev != null) { RefreshMonitors(); m = MonitorOnDevice(dev, hwnd); }
         return m;
+    }
+
+    /// <summary>
+    /// The monitor a window is on, given the Windows display it's on: that monitor, or for a split monitor the area
+    /// that contains the window's centre (its restored position when it's maximized).
+    /// </summary>
+    private MonitorInfo? MonitorOnDevice(string? device, IntPtr hwnd)
+    {
+        if (device == null) return null;
+        if (MonitorByDevice(device) is { } whole) return whole;
+        if (!_monitors.Any(m => m.IsArea && string.Equals(m.PhysicalDevice, device, StringComparison.OrdinalIgnoreCase))) return null;
+        return MonitorAreas.AreaAt(_monitors, device, WindowMover.CentreOf(hwnd));
+    }
+
+    // ------------------------------------------------------------------ split monitors: maximize fills the area
+
+    /// <summary>
+    /// "Maximize fills the area": watches for windows being maximized (EVENT_OBJECT_LOCATIONCHANGE) only while a monitor
+    /// is split and the option is on, in the program that places windows. Nothing is polled: with no split monitor
+    /// the hook isn't installed at all.
+    /// </summary>
+    private void UpdateMaximizeHook()
+    {
+        bool want = IsMainEngine && Settings.MaximizeFillsArea && _monitors.Any(m => m.IsArea);
+        if (want == (_maximizeHook != IntPtr.Zero)) return;
+        if (want)
+        {
+            _maximizeHook = Native.SetWinEventHook(Native.EVENT_OBJECT_LOCATIONCHANGE, Native.EVENT_OBJECT_LOCATIONCHANGE, IntPtr.Zero,
+                _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+            if (_maximizeHook == IntPtr.Zero) Log.Write("Could not watch for maximized windows; on a split monitor they fill the whole monitor.");
+        }
+        else
+        {
+            Native.UnhookWinEvent(_maximizeHook);
+            _maximizeHook = IntPtr.Zero;
+            _maximizedFills.Clear();
+        }
+    }
+
+    /// <summary>
+    /// A window was maximized. On a split monitor (and unless it's paused, fullscreen, can't be resized or is an app set
+    /// to "Never move"), it's restored and sized to fill the area it was in instead of the whole monitor. An app that
+    /// maximizes itself again and again is left maximized after a few tries.
+    /// </summary>
+    private void OnMaximized(IntPtr hwnd)
+    {
+        if (_maximizeHook == IntPtr.Zero || !Settings.Enabled || IsPausedForRemoteDesktop || _gamePaused) return;
+        string? dev = _monitorSource.DeviceOfWindow(hwnd);
+        if (dev == null || !_monitors.Any(m => m.IsArea && string.Equals(m.PhysicalDevice, dev, StringComparison.OrdinalIgnoreCase))) return;
+        if ((Native.GetWindowLongPtr(hwnd, Native.GWL_STYLE).ToInt64() & Native.WS_THICKFRAME) == 0) return;
+        if (WindowInfo.Classify(hwnd, _ownPid) != WindowInfo.Kind.AppWindow) return;
+        var app = WindowInfo.Identify(hwnd);
+        if (app == null || Settings.Find(app.Key)?.NeverMove == true) return;
+        var now = DateTime.UtcNow;
+        if (_maximizedFills.TryGetValue(hwnd, out var seen) && now - seen.First < TimeSpan.FromSeconds(10))
+        {
+            if (seen.Count >= 3) return; // it keeps maximizing itself: let it
+            _maximizedFills[hwnd] = (seen.First, seen.Count + 1);
+        }
+        else
+        {
+            if (_maximizedFills.Count > 200) _maximizedFills.Clear();
+            _maximizedFills[hwnd] = (now, 1);
+        }
+        var area = MonitorAreas.AreaAt(_monitors, dev, WindowMover.CentreOf(hwnd)); // where it was before it was maximized
+        if (area == null || !area.IsArea) return;
+        string device = area.DeviceName;
+        // After this event is handled: the window is done maximizing by then.
+        _host.Post(() =>
+        {
+            if (_disposed || !Native.IsWindow(hwnd) || !Native.IsZoomed(hwnd) || MonitorByDevice(device) is not { } target) return;
+            if (WindowMover.FillArea(hwnd, target, null) == WindowMover.Result.Moved)
+                Log.Write($"Maximized {app.Key}: it fills {target.Name} instead of the whole monitor (maximize fills the area).");
+        });
+    }
+
+    /// <summary>The device name of the monitor or area a window is on ("\\.\DISPLAY2#1" on a split monitor), or null.</summary>
+    private string? DeviceOfWindow(IntPtr hwnd)
+    {
+        string? dev = _monitorSource.DeviceOfWindow(hwnd);
+        return MonitorOnDevice(dev, hwnd)?.DeviceName ?? dev;
     }
 
     // ------------------------------------------------------------------ new windows
@@ -893,10 +1072,18 @@ public sealed partial class Engine : IDisposable
     {
         if (hwnd == IntPtr.Zero || idObject != Native.OBJID_WINDOW || idChild != Native.CHILDID_SELF) return;
 
+        // (First, and cheap: this one fires whenever a window moves, but only while a monitor is split.)
+        if (eventType == Native.EVENT_OBJECT_LOCATIONCHANGE)
+        {
+            if (Native.IsZoomed(hwnd)) OnMaximized(hwnd);
+            return;
+        }
+
         if (eventType == Native.EVENT_SYSTEM_MOVESIZEEND)
         {
             if (_restoreDue) _movedSinceWake.Add(hwnd); // you moved it after waking up: don't put it back
             _movedByYou.Add(hwnd);                      // "Move open windows to their monitors" leaves it alone
+            if (_maximizeHook != IntPtr.Zero && Native.IsZoomed(hwnd)) OnMaximized(hwnd); // dragged to the top edge
             return;
         }
 
@@ -953,7 +1140,7 @@ public sealed partial class Engine : IDisposable
         if (now - _lastCursorMoveUtc < TimeSpan.FromSeconds(MouseIdleSeconds)
             || p.Pointer.X != _lastCursor.X || p.Pointer.Y != _lastCursor.Y) return;
         IntPtr fg = Native.GetForegroundWindow();
-        if (fg != IntPtr.Zero && fg != hwnd) p.FocusDevice = _monitorSource.DeviceOfWindow(fg);
+        if (fg != IntPtr.Zero && fg != hwnd) p.FocusDevice = DeviceOfWindow(fg);
     }
 
     /// <summary>
@@ -1276,11 +1463,14 @@ public sealed partial class Engine : IDisposable
         var current = MonitorOfWindow(hwnd);
         bool there = current != null && current.DeviceName == target.DeviceName;
         var place = PlacementFor(rule, target);
+        if (target.IsArea && place is { Spot: null }) place = null; // "Maximized" on an area: it fills the area instead
         // Already there: a window that opened while signing in is left as it is, and so is one that's already maximized
         // (or can't be) when it only needs maximizing.
-        if (there && (p.AtSignIn || (place is { Spot: null } && (Native.IsZoomed(hwnd) || !WindowMover.CanMaximize(hwnd)))))
+        if (there && (p.AtSignIn || (place is { Spot: null } && !target.IsArea && (Native.IsZoomed(hwnd) || !WindowMover.CanMaximize(hwnd)))))
             place = null;
-        if (there && place == null)
+        // An area of a split monitor: a new window is sized to fill its area, also when it opened in it already.
+        bool fill = there && place == null && target.IsArea && !p.AtSignIn && !WindowMover.FillsArea(hwnd, target);
+        if (there && place == null && !fill)
         {
             // Already there. If that's only a stand-in for its own monitor, it still goes back when that one can be used.
             RememberDisplaced(hwnd, rule, displaced, returnTo);
@@ -1291,7 +1481,7 @@ public sealed partial class Engine : IDisposable
 
         int generation = _topologyGeneration;
         var was = there ? null : Snap(hwnd, ProcessStartOf(hwnd)); // (for Undo)
-        var result = MovePlaced(hwnd, target, place, there, StillCurrent(generation));
+        var result = MovePlaced(hwnd, target, place, there && !fill, StillCurrent(generation));
         string from = current?.Name ?? "?";
         if (result == WindowMover.Result.Aborted)
         {
@@ -1301,7 +1491,8 @@ public sealed partial class Engine : IDisposable
         if (result == WindowMover.Result.Moved)
         {
             RememberDisplaced(hwnd, rule, displaced, returnTo);
-            string how = place == null ? "" : place.Value.Spot != null ? ", where you last had it" : ", maximized";
+            string how = place?.Spot != null ? ", where you last had it" : target.IsArea ? ", filling the area"
+                : place == null ? "" : ", maximized";
             if (there) Log.Write($"Placed {app.DisplayName} on {target.Name}{how} ({reason}).  {app.Key} \"{title}\"");
             else
             {
@@ -1321,7 +1512,7 @@ public sealed partial class Engine : IDisposable
                 TargetDevice = target.DeviceName, AppKey = app.Key, FromDevice = current?.DeviceName ?? "",
                 Generation = generation, PlacedRect = placed, Requeues = p.Requeues, AtSignIn = false,
                 Pointer = p.Pointer, FocusDevice = p.FocusDevice,
-                Wanted = place?.Spot, WantMaximized = place?.Maximize == true,
+                Wanted = place?.Spot, WantMaximized = place?.Maximize == true && !target.IsArea,
             };
         }
         else
@@ -1367,9 +1558,10 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     private static WindowMover.Result MovePlaced(IntPtr hwnd, MonitorInfo target, Placement? place, bool there, Func<bool> stillValid)
     {
+        // (On an area, Move fills the area: maximizing would cover the whole monitor, so it isn't.)
         var result = place?.Spot is { } spot ? WindowMover.PlaceAtFraction(hwnd, target, spot, stillValid)
             : there ? WindowMover.Result.Moved : WindowMover.Move(hwnd, target, stillValid);
-        if (result == WindowMover.Result.Moved && place?.Maximize == true) WindowMover.Maximize(hwnd);
+        if (result == WindowMover.Result.Moved && place?.Maximize == true && !target.IsArea) WindowMover.Maximize(hwnd);
         return result;
     }
 
@@ -1525,7 +1717,7 @@ public sealed partial class Engine : IDisposable
         if (_locked) return _gamePaused;
         IntPtr fg = Native.GetForegroundWindow();
         if (fg == IntPtr.Zero || WindowInfo.GetPid(fg) == _ownPid || WindowInfo.IsShellWindow(fg)) return false;
-        return WindowMover.IsFullscreen(fg, MonitorByDevice(_monitorSource.DeviceOfWindow(fg)));
+        return WindowMover.IsFullscreen(fg, MonitorOfWindow(fg));
     }
 
     /// <summary>Works out whether a game or presentation pauses placing and learning now (and says so when that changes).</summary>
@@ -1635,7 +1827,7 @@ public sealed partial class Engine : IDisposable
     /// </summary>
     internal string? LearningBlockedReason(DateTime now)
     {
-        if (_monitors.Count(m => !m.IsTemporary) < 2) return "only one monitor";
+        if (_monitors.Count(m => !m.IsTemporary) < 2) return "only one monitor"; // (each area of a split monitor counts)
         if (IsRemoteSession) return "Remote Desktop session";
         if (HasDuplicatedMonitors) return "duplicated monitors";
         if (now - _lastMonitorChangeUtc < TimeSpan.FromSeconds(MonitorSettleSeconds)) return "monitors changed just now";
@@ -1903,7 +2095,7 @@ public sealed partial class Engine : IDisposable
 
     private WindowSnap? Snap(IntPtr h, long processStart)
     {
-        var m = MonitorByDevice(_monitorSource.DeviceOfWindow(h));
+        var m = MonitorOfWindow(h);
         if (m == null || !Native.GetWindowRect(h, out var r)) return null;
         return new WindowSnap { Monitor = RefTo(m), MonitorBounds = m.Bounds, Rect = r, Maximized = Native.IsZoomed(h), ProcessStart = processStart };
     }
@@ -1925,7 +2117,7 @@ public sealed partial class Engine : IDisposable
         _displaced[h] = new Displaced
         {
             AppKey = appKey, Home = home, Saved = saved, DroppedRect = r,
-            DroppedDevice = _monitorSource.DeviceOfWindow(h) ?? "",
+            DroppedDevice = DeviceOfWindow(h) ?? "",
             ProcessStart = saved?.ProcessStart ?? ProcessStartOf(h),
         };
     }
@@ -1950,7 +2142,7 @@ public sealed partial class Engine : IDisposable
     {
         if (!_displaced.TryGetValue(h, out var d) || !Native.IsWindow(h) || !Native.GetWindowRect(h, out var r)) return;
         d.DroppedRect = r;
-        d.DroppedDevice = _monitorSource.DeviceOfWindow(h) ?? d.DroppedDevice;
+        d.DroppedDevice = DeviceOfWindow(h) ?? d.DroppedDevice;
     }
 
     /// <summary>
@@ -2042,7 +2234,7 @@ public sealed partial class Engine : IDisposable
     {
         var stillValid = StillCurrent(generation);
         bool sameMonitor = saved != null && SameRect(saved.MonitorBounds, target.Bounds);
-        bool onTarget = string.Equals(_monitorSource.DeviceOfWindow(h), target.DeviceName, StringComparison.OrdinalIgnoreCase);
+        bool onTarget = string.Equals(DeviceOfWindow(h), target.DeviceName, StringComparison.OrdinalIgnoreCase);
         if (saved == null || !sameMonitor) return onTarget ? WindowMover.Result.Moved : WindowMover.Move(h, target, stillValid);
         if (!saved.Maximized) return WindowMover.PlaceAt(h, target, saved.Rect, stillValid);
         if (!onTarget)
@@ -2132,10 +2324,10 @@ public sealed partial class Engine : IDisposable
     private void EnforceMainMonitor(DateTime now)
     {
         var want = Settings.KeepMainMonitor;
-        if (want == null || !Settings.Enabled || IsRemoteSession || HasDuplicatedMonitors || _monitors.Count < 2) return;
+        if (want == null || !Settings.Enabled || IsRemoteSession || HasDuplicatedMonitors || _physical.Count < 2) return;
         if (Settings.KeepMainStopped) return;
         var keep = FindMonitor(want);
-        if (keep == null || keep.IsPrimary) return;
+        if (keep == null || keep.IsPhysicalPrimary) return;
         _mainFixes.RemoveAll(t => now - t > KeepMainPeriod);
         if (_mainFixes.Count >= KeepMainMaxFixes)
         {
@@ -2503,8 +2695,8 @@ public sealed partial class Engine : IDisposable
         var r = wp.rcNormalPosition;
         int w = Math.Min(r.Width, work.Width), ht = Math.Min(r.Height, work.Height);
         // (Restored positions are in "workspace" coordinates: screen coordinates shifted by a taskbar at the top or left.)
-        int left = work.Left + (work.Width - w) / 2 - (work.Left - target.Bounds.Left);
-        int top = work.Top + (work.Height - ht) / 2 - (work.Top - target.Bounds.Top);
+        int left = work.Left + (work.Width - w) / 2 - (target.PhysicalWork.Left - target.PhysicalBounds.Left);
+        int top = work.Top + (work.Height - ht) / 2 - (target.PhysicalWork.Top - target.PhysicalBounds.Top);
         wp.rcNormalPosition = new Native.RECT { Left = left, Top = top, Right = left + w, Bottom = top + ht };
         wp.showCmd = Native.SW_SHOWMINNOACTIVE;
         wp.flags = 0;
@@ -3072,6 +3264,7 @@ public sealed partial class Engine : IDisposable
     private string? ChangeMainMonitor(MonitorInfo target)
     {
         if (!Policy.MakeMainAllowed) return "Your organization doesn't allow changing the main monitor.";
+        target = PhysicalOf(target); // (Windows' own display: for an area, the whole monitor)
         var dm = NewDevMode();
         if (!Native.EnumDisplaySettings(target.DeviceName, Native.ENUM_CURRENT_SETTINGS, ref dm))
             return "Windows didn't return the settings of that monitor.";
@@ -3079,7 +3272,7 @@ public sealed partial class Engine : IDisposable
 
         // Every display's current settings (new main first).
         var displays = new List<(MonitorInfo m, Native.DEVMODE original)>();
-        foreach (var m in _monitors.OrderByDescending(m => m.DeviceName == target.DeviceName))
+        foreach (var m in _physical.OrderByDescending(m => m.DeviceName == target.DeviceName))
         {
             var d = NewDevMode();
             if (!Native.EnumDisplaySettings(m.DeviceName, Native.ENUM_CURRENT_SETTINGS, ref d))
@@ -3100,7 +3293,7 @@ public sealed partial class Engine : IDisposable
             if (r != Native.DISP_CHANGE_SUCCESSFUL)
             {
                 // Put the queued displays back where they were (and the old main back as main), so nothing is half-changed.
-                string oldMain = MainMonitor?.DeviceName ?? "";
+                string oldMain = MainMonitor?.PhysicalDevice ?? "";
                 foreach (var (m2, o2) in displays)
                 {
                     var back = o2; back.dmFields = Native.DM_POSITION;
@@ -3516,7 +3709,7 @@ internal static class WindowMover
         if (mon == null || Native.IsZoomed(hwnd)) return false;
         if (!Native.GetWindowRect(hwnd, out var r)) return false;
         long style = Native.GetWindowLongPtr(hwnd, Native.GWL_STYLE).ToInt64();
-        var b = mon.Bounds;
+        var b = mon.PhysicalBounds; // (fullscreen covers the whole monitor, also when it's split into areas)
         return (style & Native.WS_CAPTION) != Native.WS_CAPTION
                && r.Left <= b.Left && r.Top <= b.Top && r.Right >= b.Right && r.Bottom >= b.Bottom;
     }
@@ -3558,6 +3751,7 @@ internal static class WindowMover
     /// </summary>
     public static Result Move(IntPtr hwnd, MonitorInfo target, Func<bool>? stillValid)
     {
+        if (target.IsArea) return FillArea(hwnd, target, stillValid); // an area of a split monitor: fill it
         if (!Responds(hwnd)) return Result.Failed;
         if (!LiveWorkArea(target, out var wa) || stillValid?.Invoke() == false) return Result.Aborted;
         bool wasMaximized = Native.IsZoomed(hwnd);
@@ -3585,8 +3779,7 @@ internal static class WindowMover
         {
             if (wasMaximized) Native.ShowWindow(hwnd, Native.SW_MAXIMIZE);
         }
-        return string.Equals(MonitorService.DeviceOfWindow(hwnd), target.DeviceName, StringComparison.OrdinalIgnoreCase)
-            ? Result.Moved : Result.Failed;
+        return IsOn(hwnd, target) ? Result.Moved : Result.Failed;
     }
 
     /// <summary>
@@ -3605,8 +3798,7 @@ internal static class WindowMover
         if (!LiveWorkArea(target, out wa) || stillValid?.Invoke() == false) return Result.Aborted;
         Native.SetWindowPos(hwnd, IntPtr.Zero, rect.Left, rect.Top, rect.Width, rect.Height, MoveFlags);
         KeepInside(hwnd, wa);
-        return string.Equals(MonitorService.DeviceOfWindow(hwnd), target.DeviceName, StringComparison.OrdinalIgnoreCase)
-            ? Result.Moved : Result.Failed;
+        return IsOn(hwnd, target) ? Result.Moved : Result.Failed;
     }
 
     /// <summary>True if the window has a maximize button.</summary>
@@ -3651,8 +3843,7 @@ internal static class WindowMover
         var want = Clamp(Outer(left, top, vw, vh, frame), frame, wa);
         Native.SetWindowPos(hwnd, IntPtr.Zero, want.Left, want.Top, want.Width, want.Height, MoveFlags);
         KeepInside(hwnd, wa); // an app with a minimum size: keep it on screen
-        return string.Equals(MonitorService.DeviceOfWindow(hwnd), target.DeviceName, StringComparison.OrdinalIgnoreCase)
-            ? Result.Moved : Result.Failed;
+        return IsOn(hwnd, target) ? Result.Moved : Result.Failed;
     }
 
     /// <summary>
@@ -3715,7 +3906,7 @@ internal static class WindowMover
             Native.SetWindowPos(hwnd, IntPtr.Zero, left - f.Left, top - f.Top, 0, 0, MoveFlags | Native.SWP_NOSIZE);
             if (step == 0) WaitForDpi(hwnd, startDpi, targetDpi);
         }
-        return string.Equals(MonitorService.DeviceOfWindow(hwnd), target.DeviceName, StringComparison.OrdinalIgnoreCase);
+        return IsOn(hwnd, target);
     }
 
     /// <summary>
@@ -3793,16 +3984,86 @@ internal static class WindowMover
     private static bool LiveWorkArea(MonitorInfo target, out Native.RECT work)
     {
         work = target.Work;
-        var b = target.Bounds;
+        var b = target.PhysicalBounds; // (an area: its whole monitor is checked, then the area is taken from its work area)
         IntPtr hMon = Native.MonitorFromPoint(new Native.POINT { X = b.Left + b.Width / 2, Y = b.Top + b.Height / 2 }, Native.MONITOR_DEFAULTTONULL);
         if (hMon == IntPtr.Zero) return false;
         var mi = new Native.MONITORINFOEX { cbSize = Marshal.SizeOf<Native.MONITORINFOEX>() };
         if (!Native.GetMonitorInfo(hMon, ref mi)) return false;
         var m = mi.rcMonitor;
-        if (!string.Equals(mi.szDevice, target.DeviceName, StringComparison.OrdinalIgnoreCase)
+        if (!string.Equals(mi.szDevice, target.PhysicalDevice, StringComparison.OrdinalIgnoreCase)
             || m.Left != b.Left || m.Top != b.Top || m.Right != b.Right || m.Bottom != b.Bottom) return false;
-        work = mi.rcWork;
+        work = target.IsArea ? MonitorAreas.AreaRect(mi.rcWork, target.AreaStacked, target.AreaStart, target.AreaEnd) : mi.rcWork;
         return true;
+    }
+
+    /// <summary>
+    /// Is the window on the target? On its Windows display, and for an area of a split monitor, with its centre in that
+    /// area (or, for a window larger than the area, its left and top edge in it).
+    /// </summary>
+    public static bool IsOn(IntPtr hwnd, MonitorInfo target)
+    {
+        if (!string.Equals(MonitorService.DeviceOfWindow(hwnd), target.PhysicalDevice, StringComparison.OrdinalIgnoreCase)) return false;
+        if (!target.IsArea) return true;
+        if (!LiveWorkArea(target, out var wa) || CentreOf(hwnd) is not Native.POINT c) return false;
+        if (c.X >= wa.Left && c.X < wa.Right && c.Y >= wa.Top && c.Y < wa.Bottom) return true;
+        if (!Native.GetWindowRect(hwnd, out var r)) return false;
+        var f = Frame(hwnd, r);
+        int left = r.Left + f.Left, top = r.Top + f.Top;
+        return left >= wa.Left && left < wa.Right && top >= wa.Top && top < wa.Bottom;
+    }
+
+    /// <summary>
+    /// The centre of a window (its visible frame), or of where it goes when restored if it's maximized or minimized:
+    /// what decides which area of a split monitor it's in. Null if Windows doesn't say.
+    /// </summary>
+    public static Native.POINT? CentreOf(IntPtr hwnd)
+    {
+        if (Native.IsZoomed(hwnd) || Native.IsIconic(hwnd))
+        {
+            var wp = new Native.WINDOWPLACEMENT { length = Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
+            return Native.GetWindowPlacement(hwnd, ref wp) ? MonitorAreas.Centre(WorkspaceToScreen(hwnd, wp.rcNormalPosition)) : null;
+        }
+        if (!Native.GetWindowRect(hwnd, out var r)) return null;
+        var f = Frame(hwnd, r);
+        return MonitorAreas.Centre(new Native.RECT { Left = r.Left + f.Left, Top = r.Top + f.Top, Right = r.Right - f.Right, Bottom = r.Bottom - f.Bottom });
+    }
+
+    /// <summary>True when a window already fills the area (within a few pixels), not maximized.</summary>
+    public static bool FillsArea(IntPtr hwnd, MonitorInfo target)
+    {
+        if (Native.IsZoomed(hwnd) || !LiveWorkArea(target, out var wa) || !Native.GetWindowRect(hwnd, out var r)) return false;
+        var f = Frame(hwnd, r);
+        return Math.Abs(r.Left + f.Left - wa.Left) <= 2 && Math.Abs(r.Top + f.Top - wa.Top) <= 2
+            && Math.Abs(r.Right - f.Right - wa.Right) <= 2 && Math.Abs(r.Bottom - f.Bottom - wa.Bottom) <= 2;
+    }
+
+    /// <summary>
+    /// Puts a window in an area of a split monitor, sized to fill it (in the normal state, never maximized): first only
+    /// its position, so the app can rescale for that monitor's DPI, then its size. A window that can't be resized is
+    /// centred in the area; one with a minimum size larger than the area is kept as far inside it as it allows.
+    /// </summary>
+    public static Result FillArea(IntPtr hwnd, MonitorInfo target, Func<bool>? stillValid)
+    {
+        if (!Responds(hwnd)) return Result.Failed;
+        if (!LiveWorkArea(target, out var wa) || stillValid?.Invoke() == false) return Result.Aborted;
+        if (Native.IsZoomed(hwnd)) Native.ShowWindow(hwnd, Native.SW_RESTORE);
+        if (!Native.GetWindowRect(hwnd, out var r)) return Result.Failed;
+        uint startDpi = Native.GetDpiForWindow(hwnd), targetDpi = MonitorDpi(target);
+
+        // Step 1: only the position, so the app can rescale for that monitor's DPI.
+        var step1 = Fit(r, Frame(hwnd, r), wa);
+        Native.SetWindowPos(hwnd, IntPtr.Zero, step1.Left, step1.Top, 0, 0, MoveFlags | Native.SWP_NOSIZE);
+        WaitForDpi(hwnd, startDpi, targetDpi);
+
+        // Step 2: its visible frame exactly over the area (a window that can't be resized is only centred).
+        if (!LiveWorkArea(target, out wa) || stillValid?.Invoke() == false) return Result.Aborted;
+        if (!Native.GetWindowRect(hwnd, out r)) return Result.Failed;
+        var frame = Frame(hwnd, r);
+        bool resizable = (Native.GetWindowLongPtr(hwnd, Native.GWL_STYLE).ToInt64() & Native.WS_THICKFRAME) != 0;
+        var want = resizable ? Outer(wa.Left, wa.Top, wa.Width, wa.Height, frame) : Fit(r, frame, wa);
+        Native.SetWindowPos(hwnd, IntPtr.Zero, want.Left, want.Top, want.Width, want.Height, MoveFlags);
+        KeepInside(hwnd, wa); // a minimum size larger than the area: as far inside it as it goes
+        return IsOn(hwnd, target) ? Result.Moved : Result.Failed;
     }
 
     /// <summary>The target monitor's DPI (96 = 100 % scale), or 0 if Windows doesn't say.</summary>

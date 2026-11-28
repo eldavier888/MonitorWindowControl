@@ -363,10 +363,11 @@ public partial class MainWindow : FluentWindow
             // Rebuild the monitor cards only when monitors (or their names) actually changed.
             foreach (var m in _engine.Monitors) m.CanMakeMain = policy.MakeMainAllowed;
             string sig = policy.MakeMainAllowed + string.Join("|", _engine.Monitors.Select(m => $"{m.DeviceName}={m.Label}/{m.Details}/{m.ShowTemporaryOption}{m.IsTemporary}" +
-                                                                       $"/{m.ShowMonitorChoices}{m.SwitchedOffNote}{m.OpenHereIndex}"));
+                                                                       $"/{m.ShowMonitorChoices}{m.SwitchedOffNote}{m.OpenHereIndex}/{m.ShowSplitOption}{m.SplitNote}"));
             if (sig != _monitorSig) { _monitorSig = sig; MonitorsList.ItemsSource = _engine.Monitors.ToList(); }
             MonitorLayout.SetMonitors(_engine.Monitors);
             UpdateKeepMainCard(launchOnly);
+            UpdateSplitCards(launchOnly);
             UpdateDisconnectedList();
             UpdateSetupsSection();
             UpdateGroups();
@@ -730,7 +731,7 @@ public partial class MainWindow : FluentWindow
     private void UpdateKeepMainCard(bool launchOnly)
     {
         var s = _engine.Settings;
-        KeepMainCard.Visibility = _engine.Monitors.Count > 1 || s.KeepMainMonitor != null ? Visibility.Visible : Visibility.Collapsed;
+        KeepMainCard.Visibility = _engine.PhysicalMonitors.Count > 1 || s.KeepMainMonitor != null ? Visibility.Visible : Visibility.Collapsed;
         KeepMainToggle.IsChecked = s.KeepMainMonitor != null;
         KeepMainToggle.IsEnabled = !launchOnly && _engine.Policy.MakeMainAllowed;
         string kept = s.KeepMainMonitor == null ? ""

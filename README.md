@@ -157,6 +157,19 @@ shortcuts are never changed. Launch shortcuts work in every mode.
     previous display settings come back exactly. A disconnected monitor is listed under your monitors with **Connect**
     (also in the tray menu under *Monitors*); its windows go back to it when it's connected again. The main monitor and
     the last monitor in use can't be disconnected. No administrator rights are needed.
+  - **Split into areas** (one monitor, or a big ultrawide): divide a monitor into areas that work like separate
+    monitors: *Don't split*, *2 equal*, *2 (60 / 40)*, *2 (70 / 30)*, *3 equal*, *4 equal* or *2 stacked* (one above the
+    other). The dialog draws the areas as you choose and lets you name them (Left / Right, Left / Middle / Right, Top /
+    Bottom by default). Each area then has its own card, number and name ("1 · Left", "2 · Right") and appears
+    everywhere a monitor does: *Open it on*, *If it's off, open on*, *Where I used it last*, tidy up, the keyboard
+    shortcuts, Identify and the layout picture. New windows open in their app's area, sized to fill it (not maximized),
+    and learning records the area with the centre of the window you're using, so a single split monitor learns too.
+    **Windows still sees one monitor: the taskbar and Start menu don't change.** *Make main*, *Disconnect*, *Treat as
+    switched off* and *What can open here* apply to the whole monitor. With only one monitor connected, the General page
+    offers this.
+  - **Maximize fills the area** (shown while a monitor is split, on by default): a window you maximize on a split monitor
+    is sized to fill its area instead of the whole monitor (it isn't left maximized). Turn it off to let maximized windows
+    cover the whole monitor. An app that keeps maximizing itself is left maximized after a few tries.
 - **Your setups** (Monitors page, shown once you've used a second set of monitors, such as the TV on and off, or a laptop
   at home and at work): each set of monitors is remembered by the monitors' models, so the same monitors anywhere count
   as the same setup. The first one is your *usual* setup: there, apps open where you chose. While another setup is

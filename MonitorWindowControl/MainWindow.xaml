@@ -197,6 +197,19 @@
                             </StackPanel>
                         </StackPanel>
 
+                        <!-- Only one monitor: offer to split it (goes to the setting on the Monitors page) -->
+                        <ui:CardControl x:Name="SplitSuggestCard" Icon="{ui:SymbolIcon Symbol=SplitVertical24}" Visibility="Collapsed">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Only one monitor? Split it into areas that work like separate monitors" />
+                                    <TextBlock Style="{StaticResource Secondary}"
+                                               Text="Apps then open in their own area, sized to fill it, and are learned there, like on separate monitors. Windows still sees one monitor: the taskbar and Start menu don't change." />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:Button Content="Split into areas…" MinWidth="140" Click="SplitSuggest_Click"
+                                       AutomationProperties.Name="Split your monitor into areas: opens the setting on the Monitors page" />
+                        </ui:CardControl>
+
                         <ui:CardControl Icon="{ui:SymbolIcon Symbol=Power24}">
                             <ui:CardControl.Header>
                                 <StackPanel Margin="0,0,16,0">
@@ -462,7 +475,7 @@
                                                            ToolTip="Give this monitor your own name and number, for example &quot;2 · TV&quot;" />
                                                 <ui:Button Content="Make main" Margin="8,0,0,0" Click="MakeMain_Click" IsEnabled="{Binding CanMakeMain}"
                                                            AutomationProperties.Name="{Binding Name, StringFormat='Make {0} the main monitor'}"
-                                                           Visibility="{Binding IsPrimary, Converter={StaticResource HideWhenTrue}}"
+                                                           Visibility="{Binding IsPhysicalPrimary, Converter={StaticResource HideWhenTrue}}"
                                                            ToolTip="Make this the main monitor in Windows (taskbar clock, Start menu, and where new apps open)" />
                                                 <ui:Button Content="Disconnect" Margin="8,0,0,0" Click="DisconnectMonitor_Click"
                                                            Icon="{ui:SymbolIcon PlugDisconnected24}"
@@ -517,6 +530,19 @@
                                                 <ComboBoxItem Content="Only apps I choose" />
                                             </ComboBox>
                                         </ui:CardControl>
+                                        <!-- One monitor (or a big ultrawide) divided into areas that work like separate monitors -->
+                                        <ui:CardControl Icon="{ui:SymbolIcon Symbol=SplitVertical24}" Margin="40,0,0,4"
+                                                        Visibility="{Binding ShowSplitOption, Converter={StaticResource ShowWhenTrue}}">
+                                            <ui:CardControl.Header>
+                                                <StackPanel Margin="0,0,16,0">
+                                                    <TextBlock Style="{StaticResource CardTitle}" Text="Split into areas" />
+                                                    <TextBlock Style="{StaticResource Secondary}" Text="{Binding SplitNote}" />
+                                                </StackPanel>
+                                            </ui:CardControl.Header>
+                                            <ui:Button Content="Split into areas…" Click="SplitMonitor_Click" MinWidth="140"
+                                                       AutomationProperties.Name="{Binding Name, StringFormat='Split {0} into areas'}"
+                                                       ToolTip="Divide this monitor into areas that work like separate monitors" />
+                                        </ui:CardControl>
                                     </StackPanel>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
@@ -538,6 +564,16 @@
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
+                        <!-- Split monitors: what maximizing a window does -->
+                        <ui:CardControl x:Name="MaximizeFillsCard" Icon="{ui:SymbolIcon Symbol=Maximize24}" Margin="0,12,0,4" Visibility="Collapsed">
+                            <ui:CardControl.Header>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Style="{StaticResource CardTitle}" Text="Maximize fills the area" />
+                                    <TextBlock x:Name="MaximizeFillsHint" Style="{StaticResource Secondary}" />
+                                </StackPanel>
+                            </ui:CardControl.Header>
+                            <ui:ToggleSwitch x:Name="MaximizeFillsToggle" AutomationProperties.Name="Maximize fills the area" Click="MaximizeFillsToggle_Click" />
+                        </ui:CardControl>
                         <ui:CardControl x:Name="KeepMainCard" Icon="{ui:SymbolIcon Symbol=DesktopCheckmark24}" Margin="0,12,0,4">
                             <ui:CardControl.Header>
                                 <StackPanel Margin="0,0,16,0">

@@ -46,6 +46,7 @@ Store or other infrastructure). Effort: S / M / L / XL.
 | 34 | Per-app timing for stubborn apps (Advanced) | could | S | No |
 | 35 | Organisation policies (preset or lock settings through the registry) | could | M | No |
 | 36 | Translated interface | could | L | N/A |
+| 42 | Split a monitor into areas that work like separate monitors | could | M | No (Snap layouts and PowerToys FancyZones arrange windows, but apps can't have a home area, and nothing is learned per area) |
 | 37 | Code-sign both executables (Azure Artifact Signing) | later | M | N/A |
 | 38 | winget package | later | S | N/A |
 | 39 | Microsoft Store (MSIX) with packaged startup tasks | later | L | N/A |
@@ -545,6 +546,18 @@ Store or other infrastructure). Effort: S / M / L / XL.
 
 **Risks.** Touches every string, and every translation needs a reviewer. Do it after the UI settles, or strings will churn.
 
+### 42. Split a monitor into areas that work like separate monitors
+**Status:** built (2 equal, 60/40, 70/30, 3 equal, 4 equal or 2 stacked; the shares come from the preset and aren't draggable; Windows still sees one monitor, so the taskbar and Start menu don't change; "Treat as switched off", "What can open here" and "Apps can open here" apply to the whole monitor; not yet tried on real hardware).
+
+*Monitors · effort M*
+
+**Problem.** With one monitor there's nothing to learn, and on a big ultrawide "the monitor" is too coarse: you keep the editor on the left and chat on the right, but every app opens in the middle at whatever size it likes.
+
+**Windows today.** No. Snap layouts and FancyZones arrange windows by hand, but an app can't have a home area that its new windows open in.
+
+**Design.** Monitors page, each monitor card: 'Split into areas…' opens a dialog with the presets, a live drawing of the areas and their names (Left / Right, Left / Middle / Right, Top / Bottom). Each area is an extra MonitorInfo ("\\.\DISPLAYn#k", the monitor's hardware identity plus an area number, bounds = a share of the work area), so it gets its own card, number and name and appears in 'Open it on', fallbacks, 'Where I used it last', tidy up, shortcuts, Identify and the layout picture. Every mapping of a window to a monitor resolves a split monitor by the window's centre (its restored position when maximized). New windows are placed in their area, sized to fill it, in the normal state, kept inside it as far as a minimum size allows. Learning counts areas, so one split monitor learns. Make main, Disconnect, 'switched off' and DPI use the whole monitor. 'Maximize fills the area' (on by default) restores a window maximized on a split monitor to its area; the EVENT_OBJECT_LOCATIONCHANGE hook exists only while a monitor is split and the option is on, so there's no polling and nothing runs otherwise. Saved in settings.json as MonitorSplits (monitor identity, preset, shares, names) plus MaximizeFillsArea; homes on an area save its area number in the hardware identity. The General page suggests it when only one monitor is connected.
+
+**Risks.** Apps that maximize themselves again are left maximized after three tries in ten seconds. A window larger than its area (minimum size) sticks out of it. Older versions see a home on an area as the whole monitor.
 ## Later (needs infrastructure)
 
 ### 37. Code-sign both executables (Azure Artifact Signing)

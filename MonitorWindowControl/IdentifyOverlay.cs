@@ -83,10 +83,10 @@ public static class IdentifyOverlay
         var text = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
         text.Children.Add(new TextBlock
         {
-            Text = m.Number is int n ? n.ToString() : m.Name, FontSize = 120, FontWeight = FontWeights.SemiBold,
+            Text = m.ShownNumber is int n ? n.ToString() : m.Name, FontSize = 120, FontWeight = FontWeights.SemiBold,
             Foreground = main, HorizontalAlignment = HorizontalAlignment.Center,
         });
-        if (m.Number != null)
+        if (m.ShownNumber != null)
             text.Children.Add(new TextBlock { Text = m.Name, FontSize = 36, Foreground = main, HorizontalAlignment = HorizontalAlignment.Center });
         if (!string.Equals(m.FriendlyName, m.Name, StringComparison.CurrentCultureIgnoreCase) && !m.Name.EndsWith(m.FriendlyName, StringComparison.CurrentCulture))
             text.Children.Add(new TextBlock { Text = m.FriendlyName, FontSize = 22, Foreground = second, HorizontalAlignment = HorizontalAlignment.Center });

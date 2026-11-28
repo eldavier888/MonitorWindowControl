@@ -39,8 +39,10 @@ internal static class DisplayTopology
     /// <summary>Why a monitor can't be disconnected from Windows, or null if it can.</summary>
     public static string? WhyNotDisconnect(MonitorInfo m, IReadOnlyList<MonitorInfo> all)
     {
-        if (m.IsPrimary) return "The main monitor can't be disconnected. Make another monitor the main one first.";
-        if (all.Count < 2) return "This is the only monitor Windows uses, so it can't be disconnected.";
+        if (m.IsPhysicalPrimary) return "The main monitor can't be disconnected. Make another monitor the main one first.";
+        // (An area of a split monitor is part of one monitor: count Windows' own monitors.)
+        if (all.Select(x => x.PhysicalDevice).Distinct(StringComparer.OrdinalIgnoreCase).Count() < 2)
+            return "This is the only monitor Windows uses, so it can't be disconnected.";
         if (m.IsDuplicated) return "Monitors that show the same picture can't be disconnected one at a time.";
         return null;
     }
@@ -58,7 +60,7 @@ internal static class DisplayTopology
         if (WhyNotDisconnect(m, all) is string why) return why;
         before = Current();
         if (before == null) return "Windows didn't say how the monitors are set up, so nothing was changed.";
-        var keep = before.Paths.Where(p => !string.Equals(SourceName(p), m.DeviceName, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var keep = before.Paths.Where(p => !string.Equals(SourceName(p), m.PhysicalDevice, StringComparison.OrdinalIgnoreCase)).ToArray();
         if (keep.Length == before.Paths.Length) return "Windows doesn't list this monitor right now, so nothing was changed.";
         if (keep.Length == 0) return "This is the only monitor Windows uses, so it can't be disconnected.";
         var (paths, modes) = Compact(keep, before.Modes);

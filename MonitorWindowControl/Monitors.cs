@@ -25,6 +25,8 @@ public sealed class MonitorTarget
     public string? Serial { get; init; }
     /// <summary>How it's connected (DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY).</summary>
     public uint OutputTechnology { get; init; } = OutputOther;
+    /// <summary>For one area of a split monitor: which area (1 = the first, left or top). Null for a whole monitor.</summary>
+    public int? Area { get; init; }
 
     /// <summary>Your own name for it, or null (set by the engine).</summary>
     public string? Nickname { get; set; }
@@ -34,7 +36,7 @@ public sealed class MonitorTarget
     /// <summary>Your name for it, else its model name.</summary>
     public string ShownName => string.IsNullOrWhiteSpace(Nickname) ? FriendlyName : Nickname!;
 
-    public MonitorHardware Hardware => new() { DevicePath = DevicePath, Model = Model, Serial = Serial };
+    public MonitorHardware Hardware => new() { DevicePath = DevicePath, Model = Model, Serial = Serial, Area = Area };
 
     /// <summary>"HDMI", "DisplayPort"… ("" when Windows doesn't say).</summary>
     public string Connection => MonitorService.ConnectionName(OutputTechnology);
@@ -46,13 +48,51 @@ public sealed class MonitorTarget
     public bool MayBeTemporary => OutputTechnology is OutputMiracast or OutputIndirectWired or OutputIndirectVirtual;
 }
 
-/// <summary>One connected display, identified by its device name (\\.\DISPLAY2, for example).</summary>
+/// <summary>
+/// One connected display, identified by its device name (\\.\DISPLAY2, for example). A monitor you split into areas
+/// is listed as one of these per area instead ("\\.\DISPLAY2#1", "\\.\DISPLAY2#2"…), and each area works like a monitor
+/// of its own; <see cref="Physical"/> is then the whole monitor.
+/// </summary>
 public sealed class MonitorInfo
 {
+    private string? _physicalDevice;
+
     public string DeviceName { get; init; } = "";
+    /// <summary>True for the main monitor (for a split one: only its first area, so there's one main).</summary>
     public bool IsPrimary { get; init; }
     public Native.RECT Bounds { get; init; }
     public Native.RECT Work { get; init; }
+
+    /// <summary>For one area of a split monitor: the whole monitor, as Windows sees it. Null for a whole monitor.</summary>
+    public MonitorInfo? Physical { get; init; }
+    /// <summary>The display Windows has (\\.\DISPLAY2): what Make main, Disconnect and DPI must use.</summary>
+    public string PhysicalDevice { get => _physicalDevice ?? DeviceName; init => _physicalDevice = value; }
+    /// <summary>For an area: which one (1 = left or top). Null for a whole monitor.</summary>
+    public int? Area { get; init; }
+    /// <summary>For an area: how many areas its monitor is split into.</summary>
+    public int AreaCount { get; init; }
+    /// <summary>For an area: the areas are stacked (top and bottom) rather than side by side.</summary>
+    public bool AreaStacked { get; init; }
+    /// <summary>For an area: where it starts and ends, as fractions (0 to 1) of its monitor's work area.</summary>
+    public double AreaStart { get; init; }
+    public double AreaEnd { get; init; } = 1;
+    /// <summary>For the first area (or a whole monitor): how it's split, one of <see cref="SplitPresets"/>.</summary>
+    public string SplitPreset { get; init; } = SplitPresets.None;
+
+    public bool IsArea => Area != null;
+    public Native.RECT PhysicalBounds => Physical?.Bounds ?? Bounds;
+    public Native.RECT PhysicalWork => Physical?.Work ?? Work;
+    /// <summary>True when its physical monitor is Windows' main monitor (for an area, every area of it).</summary>
+    public bool IsPhysicalPrimary => Physical?.IsPrimary ?? IsPrimary;
+
+    /// <summary>How many physical monitors are connected (set by the engine).</summary>
+    public int PhysicalCount { get; set; } = 1;
+
+    /// <summary>The number shown when you haven't numbered your monitors but one is split: its place in the list (set by the engine).</summary>
+    public int? AutoNumber { get; set; }
+
+    /// <summary>Your number, else the automatic one (only while a monitor is split), else null.</summary>
+    public int? ShownNumber => Number ?? AutoNumber;
 
     /// <summary>The physical monitor(s) showing this display: one, or several when duplicated. Never empty.</summary>
     public IReadOnlyList<MonitorTarget> Targets { get; init; } = new[] { new MonitorTarget() };
@@ -97,8 +137,19 @@ public sealed class MonitorInfo
     /// <summary>"Make main" can be used (false when your organization doesn't allow changing the main monitor).</summary>
     public bool CanMakeMain { get; set; } = true;
 
-    /// <summary>Show "Treat as switched off" and "What can open here" for this monitor.</summary>
-    public bool ShowMonitorChoices => HasOtherMonitors && !IsDuplicated;
+    /// <summary>
+    /// Show "Treat as switched off" and "What can open here" for this monitor. They apply to a whole physical monitor,
+    /// so a split one shows them on its first area only.
+    /// </summary>
+    public bool ShowMonitorChoices => PhysicalCount > 1 && !IsDuplicated && (Area == null || Area == 1);
+
+    /// <summary>Show "Split into areas": on a whole monitor, or on the first area of a split one. Never while duplicated.</summary>
+    public bool ShowSplitOption => !IsDuplicated && (Area == null || Area == 1);
+
+    /// <summary>The description under "Split into areas".</summary>
+    public string SplitNote => IsArea
+        ? $"Split into {SplitPresets.Describe(SplitPreset).ToLowerInvariant()}. Each area works like a separate monitor here. " + SplitPresets.HonestNote
+        : "Divide this monitor into 2 to 4 areas that work like separate monitors: apps open in their own area, sized to fill it. " + SplitPresets.HonestNote;
 
     /// <summary>The "Treat as switched off" choice: 0 = no, 1 = until I turn it back on, 2 = for a while.</summary>
     public int SwitchedOffIndex => !IsSwitchedOff ? 0 : SwitchedOffUntilUtc == null ? 1 : 2;
@@ -119,7 +170,7 @@ public sealed class MonitorInfo
         : "Choose \"Only apps I choose\" to keep this monitor for a few apps, like streaming apps on a TV.";
 
     /// <summary>The name to show: "2 · TV" style when numbered, your name for it, else the model name.</summary>
-    public string Name => (Number is int n ? $"{n} · " : "") +
+    public string Name => (ShownNumber is int n ? $"{n} · " : "") +
         (IsDuplicated ? string.Join(" + ", Targets.Select(t => t.ShownName)) + " (duplicated)" : Targets[0].ShownName);
 
     /// <summary>Name shown to the user, for example "1 · Odyssey G8 (main)".</summary>
@@ -131,11 +182,12 @@ public sealed class MonitorInfo
         get
         {
             var parts = new List<string>();
-            if (!IsDuplicated && !string.IsNullOrWhiteSpace(Nickname)) parts.Add(FriendlyName);
+            if (Physical != null) parts.Add($"Area {Area} of {AreaCount} on {Physical.FriendlyName}");
+            else if (!IsDuplicated && !string.IsNullOrWhiteSpace(Nickname)) parts.Add(FriendlyName);
             parts.Add($"{Bounds.Width} × {Bounds.Height}");
             string connection = string.Join(" + ", Targets.Select(t => t.Connection).Where(c => c.Length > 0));
             if (connection.Length > 0) parts.Add(connection);
-            parts.Add($"Windows display {DeviceName.Replace(@"\\.\DISPLAY", "")}");
+            parts.Add($"Windows display {PhysicalDevice.Replace(@"\\.\DISPLAY", "")}");
             string text = string.Join("   ·   ", parts);
             if (IsDuplicated)
                 text += "\nThese monitors show the same picture (Duplicate in Windows). Apps aren't learned while monitors are duplicated.";
@@ -151,7 +203,8 @@ public sealed class MonitorInfo
     /// Show the "Apps can open here" switch: wireless, virtual and USB monitors, but not the main one (unless it's
     /// temporary already, so you can still change that).
     /// </summary>
-    public bool ShowTemporaryOption => !IsDuplicated && Targets[0].MayBeTemporary && (!IsPrimary || IsTemporary);
+    public bool ShowTemporaryOption => !IsDuplicated && Targets[0].MayBeTemporary && (!IsPhysicalPrimary || IsTemporary)
+                                       && (Area == null || Area == 1);
 
     /// <summary>The opposite of <see cref="IsTemporary"/>, for the switch.</summary>
     public bool AppsCanOpenHere => !IsTemporary;
@@ -160,7 +213,7 @@ public sealed class MonitorInfo
     public bool CanRename => !IsDuplicated;
 
     /// <summary>"Disconnect from Windows" is offered: never for the main monitor, the only one, or duplicated monitors.</summary>
-    public bool CanDisconnect => !IsPrimary && HasOtherMonitors && !IsDuplicated;
+    public bool CanDisconnect => !IsPhysicalPrimary && PhysicalCount > 1 && !IsDuplicated && (Area == null || Area == 1);
 
     public override string ToString() => Label;
 }
@@ -398,6 +451,130 @@ public static class MonitorService
 }
 
 /// <summary>
+/// "Split into areas": a physical monitor divided into 2 to 4 areas that work like separate monitors. Pure logic (no
+/// Windows calls), so it can be tested. Windows itself still sees one monitor.
+/// </summary>
+public static class MonitorAreas
+{
+    /// <summary>"\\.\DISPLAY2#1" → "\\.\DISPLAY2" (a whole monitor's device name is returned as it is).</summary>
+    public static string PhysicalDeviceOf(string device)
+    {
+        int i = device.IndexOf('#');
+        return i > 0 ? device[..i] : device;
+    }
+
+    /// <summary>"\\.\DISPLAY2#2" → 2; null for a whole monitor's device name.</summary>
+    public static int? AreaOfDevice(string? device)
+    {
+        if (string.IsNullOrEmpty(device)) return null;
+        int i = device.IndexOf('#');
+        return i > 0 && int.TryParse(device.AsSpan(i + 1), System.Globalization.NumberStyles.None,
+                                     System.Globalization.CultureInfo.InvariantCulture, out int n) && n >= 1 ? n : null;
+    }
+
+    /// <summary>The device name of one area: "\\.\DISPLAY2" and 1 → "\\.\DISPLAY2#1".</summary>
+    public static string AreaDevice(string physicalDevice, int area) =>
+        physicalDevice + "#" + area.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// One area of a work area: from <paramref name="start"/> to <paramref name="end"/> (fractions, 0 to 1) of its width,
+    /// or of its height when <paramref name="stacked"/>. Edges are rounded the same way for neighbours, so areas never
+    /// overlap or leave a gap.
+    /// </summary>
+    public static Native.RECT AreaRect(Native.RECT work, bool stacked, double start, double end)
+    {
+        static int Edge(int from, int size, double f) => from + (int)Math.Round(Math.Clamp(f, 0, 1) * size, MidpointRounding.AwayFromZero);
+        return stacked
+            ? new Native.RECT { Left = work.Left, Right = work.Right, Top = Edge(work.Top, work.Height, start), Bottom = Edge(work.Top, work.Height, end) }
+            : new Native.RECT { Top = work.Top, Bottom = work.Bottom, Left = Edge(work.Left, work.Width, start), Right = Edge(work.Left, work.Width, end) };
+    }
+
+    /// <summary>Every area of a work area, for these shares (as <see cref="SplitPresets.Ratios"/> gives them).</summary>
+    public static List<Native.RECT> Rects(Native.RECT work, bool stacked, IReadOnlyList<double> ratios)
+    {
+        var list = new List<Native.RECT>();
+        double at = 0;
+        for (int i = 0; i < ratios.Count; i++)
+        {
+            double end = i == ratios.Count - 1 ? 1 : at + ratios[i];
+            list.Add(AreaRect(work, stacked, at, end));
+            at = end;
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// The monitors as the app uses them: each split monitor replaced by its areas (in order), every other monitor as
+    /// it is. <paramref name="splitOf"/> gives the split saved for a physical monitor, or null. Duplicated monitors are
+    /// never split.
+    /// </summary>
+    public static List<MonitorInfo> Split(IReadOnlyList<MonitorInfo> physical, Func<MonitorInfo, MonitorSplit?> splitOf)
+    {
+        var list = new List<MonitorInfo>();
+        foreach (var m in physical)
+        {
+            var split = m.IsDuplicated ? null : splitOf(m);
+            var ratios = split == null ? null : SplitPresets.Ratios(split);
+            if (split == null || ratios == null || ratios.Length < 2) { list.Add(m); continue; }
+            bool stacked = SplitPresets.IsStacked(split.Preset);
+            var names = SplitPresets.Names(split);
+            var t = m.Targets[0];
+            double at = 0;
+            for (int i = 0; i < ratios.Length; i++)
+            {
+                double end = i == ratios.Length - 1 ? 1 : at + ratios[i];
+                var r = AreaRect(m.Work, stacked, at, end);
+                list.Add(new MonitorInfo
+                {
+                    DeviceName = AreaDevice(m.DeviceName, i + 1),
+                    PhysicalDevice = m.DeviceName,
+                    Physical = m,
+                    IsPrimary = m.IsPrimary && i == 0,
+                    Bounds = r, Work = r,
+                    Area = i + 1, AreaCount = ratios.Length, AreaStacked = stacked, AreaStart = at, AreaEnd = end,
+                    SplitPreset = split.Preset,
+                    Targets = new[]
+                    {
+                        new MonitorTarget
+                        {
+                            FriendlyName = names[i], DevicePath = t.DevicePath, Model = t.Model, Serial = t.Serial,
+                            OutputTechnology = t.OutputTechnology, Area = i + 1,
+                        },
+                    },
+                });
+                at = end;
+            }
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// The monitor or area that a point (a window's centre) on this Windows display belongs to: the area containing it,
+    /// else the nearest area, else the first. Null if nothing on that display is connected. <paramref name="point"/> null
+    /// (Windows didn't say where the window is) gives the first area.
+    /// </summary>
+    public static MonitorInfo? AreaAt(IReadOnlyList<MonitorInfo> monitors, string physicalDevice, Native.POINT? point)
+    {
+        MonitorInfo? best = null;
+        long bestDistance = long.MaxValue;
+        foreach (var m in monitors)
+        {
+            if (!string.Equals(m.PhysicalDevice, physicalDevice, StringComparison.OrdinalIgnoreCase)) continue;
+            if (point is not Native.POINT p) { if (best == null || (m.Area ?? 0) < (best.Area ?? 0)) best = m; continue; }
+            var b = m.Bounds;
+            long dx = p.X < b.Left ? b.Left - p.X : p.X >= b.Right ? p.X - b.Right + 1 : 0;
+            long dy = p.Y < b.Top ? b.Top - p.Y : p.Y >= b.Bottom ? p.Y - b.Bottom + 1 : 0;
+            long d = dx * dx + dy * dy;
+            if (d < bestDistance) { best = m; bestDistance = d; }
+        }
+        return best;
+    }
+
+    /// <summary>The centre of a rectangle (a window).</summary>
+    public static Native.POINT Centre(Native.RECT r) => new() { X = r.Left + (r.Right - r.Left) / 2, Y = r.Top + (r.Bottom - r.Top) / 2 };
+}
+
+/// <summary>
 /// Finds a saved monitor among the connected ones. In order: the port it's plugged into (device path), then its model
 /// and serial number, then the model name and Windows' display number (what older versions saved). Pure logic, so it
 /// can be tested without real monitors.
@@ -412,6 +589,28 @@ public static class MonitorMatcher
     public static (MonitorInfo Monitor, MonitorTarget Target)? FindTarget(IReadOnlyList<MonitorInfo> monitors, string? name,
                                                                          string? device, MonitorHardware? hw)
     {
+        int? area = hw?.Area ?? MonitorAreas.AreaOfDevice(device);
+        var hit = FindMonitorTarget(monitors, name, device, hw);
+        return hit is { } h ? PickArea(monitors, h, area) : null;
+    }
+
+    /// <summary>
+    /// The physical monitor is found; if it's split, the saved area of it (a monitor saved before it was split, or an
+    /// area that no longer exists, gives its first area). An area saved on a monitor that isn't split any more gives the
+    /// whole monitor.
+    /// </summary>
+    private static (MonitorInfo Monitor, MonitorTarget Target) PickArea(IReadOnlyList<MonitorInfo> monitors,
+                                                                       (MonitorInfo m, MonitorTarget t) hit, int? area)
+    {
+        if (!hit.m.IsArea) return hit;
+        var areas = monitors.Where(m => m.IsArea && string.Equals(m.PhysicalDevice, hit.m.PhysicalDevice, StringComparison.OrdinalIgnoreCase)).ToList();
+        var pick = areas.FirstOrDefault(m => m.Area == (area ?? 1)) ?? areas.FirstOrDefault(m => m.Area == 1) ?? hit.m;
+        return (pick, pick.Targets[0]);
+    }
+
+    private static (MonitorInfo Monitor, MonitorTarget Target)? FindMonitorTarget(IReadOnlyList<MonitorInfo> monitors, string? name,
+                                                                                  string? device, MonitorHardware? hw)
+    {
         var all = monitors.SelectMany(m => m.Targets.Select(t => (m, t))).ToList();
         hw = hw == null || hw.IsEmpty ? null : hw;
 
@@ -424,7 +623,7 @@ public static class MonitorMatcher
         if (hw != null && !string.IsNullOrEmpty(hw.Model) && !string.IsNullOrEmpty(hw.Serial))
         {
             var hits = all.Where(x => Eq(x.t.Model, hw.Model) && x.t.Serial == hw.Serial).ToList();
-            if (hits.Count == 1) return hits[0];
+            if (hits.Count > 0 && hits.All(x => SamePhysical(x.m, hits[0].m))) return hits[0]; // (the areas of one monitor count once)
         }
 
         // 3. Model name and display number, never picking a monitor that is known to be a different one.
@@ -449,20 +648,27 @@ public static class MonitorMatcher
     {
         static bool Generic(string n) => n.StartsWith("Display ", StringComparison.Ordinal);
         static string Model(string n) { int i = n.LastIndexOf(" (DISPLAY", StringComparison.Ordinal); return i > 0 ? n[..i] : n; }
+        // An area's own name is "Left"; its monitor's model name is what was saved before it was split.
+        static string ModelName((MonitorInfo m, MonitorTarget t) x) => x.m.Physical?.FriendlyName ?? x.t.FriendlyName;
 
-        var byDevice = all.Where(x => Eq(x.m.DeviceName, device)).ToList();
+        string? physicalDevice = device == null ? null : MonitorAreas.PhysicalDeviceOf(device);
+        var byDevice = all.Where(x => Eq(x.m.DeviceName, device) || Eq(x.m.PhysicalDevice, physicalDevice)).ToList();
         if (string.IsNullOrEmpty(name)) return byDevice.Count > 0 ? byDevice[0] : null;
-        var byName = all.Where(x => x.t.FriendlyName == name).ToList();
-        if (byName.Count > 0 && byName.All(x => ReferenceEquals(x.m, byName[0].m))) return byName[0];
+        var byName = all.Where(x => x.t.FriendlyName == name || ModelName(x) == name).ToList();
+        if (byName.Count > 0 && byName.All(x => SamePhysical(x.m, byName[0].m))) return byName[0];
         if (byDevice.Count == 0) return null;
         if (byName.Count > 1)                                                          // identical models: trust the number
-            return byName.Where(x => ReferenceEquals(x.m, byDevice[0].m)).Select(x => ((MonitorInfo, MonitorTarget)?)x)
+            return byName.Where(x => SamePhysical(x.m, byDevice[0].m)).Select(x => ((MonitorInfo, MonitorTarget)?)x)
                          .FirstOrDefault() ?? byDevice[0];
         if (Generic(name)) return byDevice[0];                                         // no model name to go by
-        foreach (var x in byDevice) if (Generic(x.t.FriendlyName)) return x;
-        foreach (var x in byDevice) if (Model(x.t.FriendlyName) == Model(name)) return x; // same model, renumbered
+        foreach (var x in byDevice) if (Generic(ModelName(x))) return x;
+        foreach (var x in byDevice) if (Model(ModelName(x)) == Model(name)) return x;  // same model, renumbered
         return null;
     }
+
+    /// <summary>The same monitor, or two areas of the same physical monitor.</summary>
+    private static bool SamePhysical(MonitorInfo a, MonitorInfo b) =>
+        ReferenceEquals(a, b) || (a.IsArea && b.IsArea && string.Equals(a.PhysicalDevice, b.PhysicalDevice, StringComparison.OrdinalIgnoreCase));
 
     private static bool Eq(string? a, string? b) =>
         !string.IsNullOrEmpty(a) && string.Equals(a, b, StringComparison.OrdinalIgnoreCase);

@@ -16,6 +16,7 @@ public static class Native
     public const uint EVENT_SYSTEM_MOVESIZEEND = 0x000B; // you finished dragging or resizing a window
     public const uint EVENT_OBJECT_UNCLOAKED = 0x8018;   // a window that was hidden by Windows (cloaked) became visible
     public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;  // another window came to the front
+    public const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B; // a window moved or changed size (only watched while a monitor is split)
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
     public const int OBJID_WINDOW = 0;

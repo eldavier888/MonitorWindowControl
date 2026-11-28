@@ -39,6 +39,7 @@ public static class SettingsTransfer
             .Concat(s.Apps.SelectMany(a => a.Positions).Select(p => p.Monitor))
             .Concat(s.MonitorNicknames.Select(n => n.Monitor))
             .Concat(s.MonitorOptions.Select(o => o.Monitor))
+            .Concat(s.MonitorSplits.Select(x => x.Monitor))
             .Concat(s.Apps.SelectMany(a => a.WindowRules).Select(w => w.Monitor).OfType<MonitorRef>())
             .Concat(s.Groups.SelectMany(g => g.Apps).Select(a => a.Monitor).OfType<MonitorRef>())
             .Concat(s.Setups.SelectMany(x => x.Homes).Select(h => h.Monitor))
@@ -49,8 +50,13 @@ public static class SettingsTransfer
         r.MonitorDevice == null && r.MonitorName == null && r.MonitorHardware == null ? null
             : new MonitorRef { Device = r.MonitorDevice ?? "", Name = r.MonitorName, Hardware = r.MonitorHardware };
 
-    /// <summary>What tells one saved monitor from another: its serial number, else its port, else its model name and number.</summary>
-    private static string Key(MonitorRef r)
+    /// <summary>
+    /// What tells one saved monitor from another: its serial number, else its port, else its model name and number
+    /// (and which area, for an area of a split monitor).
+    /// </summary>
+    private static string Key(MonitorRef r) => IdentityKey(r) + (r.Hardware?.Area is int a ? "#" + a : "");
+
+    private static string IdentityKey(MonitorRef r)
     {
         var h = r.Hardware;
         if (!string.IsNullOrEmpty(h?.Model) && !string.IsNullOrEmpty(h!.Serial)) return $"s:{h.Model}|{h.Serial}".ToUpperInvariant();
